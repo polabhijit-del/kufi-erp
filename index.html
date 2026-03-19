@@ -125,19 +125,21 @@ body {
 #sidebar.collapsed .nav-section-label { opacity: 0; height: 0; padding: 0; }
 
 .nav-item {
-  display: flex; align-items: center; gap: 10px;
+  display: flex !important;
+  align-items: center;
+  gap: 10px;
   padding: 10px 16px;
+  width: 100%;
+  box-sizing: border-box;
+  flex-shrink: 0;
   color: var(--sidebar-text);
   cursor: pointer;
   border-radius: 0;
   transition: background 0.15s ease, color 0.15s ease, border-left-color 0.15s ease;
-  white-space: nowrap; overflow: hidden;
+  white-space: nowrap;
+  overflow: hidden;
   position: relative;
   z-index: 1;
-  display: flex;
-  width: 100%;
-  box-sizing: border-box;
-  flex-shrink: 0;
   user-select: none;
   border-left: 3px solid transparent;
   margin: 0;
@@ -2766,7 +2768,7 @@ body.dark-mode .em-q-header { background: #1e293b; }
 @media (hover: none) and (pointer: coarse) {
   .btn        { min-height: 44px; padding: 10px 16px; font-size: 14px; }
   .btn-sm     { min-height: 36px; padding: 7px 14px;  font-size: 13px; }
-  .nav-item   { min-height: 48px; padding: 12px 14px; }
+  .nav-item   { display: flex !important; width: 100%; box-sizing: border-box; min-height: 48px; padding: 12px 14px; }
   .form-input,
   .form-select{ min-height: 44px; font-size: 16px; /* prevents iOS zoom */ padding: 10px 12px; }
   .search-input { min-height: 44px; font-size: 16px; }
@@ -3923,10 +3925,7 @@ const DashboardModule = (() => {
 
     const myActIds = new Set(myActs.map(function(a){ return a.id; }));
     const allActivityTasks = DB.getAll('activityTasks');
-    /* Use local date components — toISOString() returns UTC which is wrong for IST users */
-    const todayStr = today.getFullYear() + '-'
-      + String(today.getMonth() + 1).padStart(2, '0') + '-'
-      + String(today.getDate()).padStart(2, '0');
+    const todayStr = today.toISOString().slice(0, 10);
 
     /* Today's tasks — pending AND completed task records for today */
     const tasksTodayRaw = allActivityTasks.filter(function(t) {
@@ -3934,12 +3933,13 @@ const DashboardModule = (() => {
       if (!myActIds.has(t.activityId)) return false;
       return (t.dueDate || '').slice(0, 10) === todayStr;
     });
-    /* ALSO include activities whose nextFollowup = today but have no task record */
+    /* ALSO include activities whose nextFollowup = today but have no task record for today
+       (the most common case — sales person sets a follow-up date on the activity itself) */
     const taskActIdsToday = new Set(tasksTodayRaw.map(function(t){ return t.activityId; }));
     const activityFollowupToday = myActs.filter(function(a) {
       if (!a.nextFollowup) return false;
       if ((a.nextFollowup || '').slice(0, 10) !== todayStr) return false;
-      if (taskActIdsToday.has(a.id)) return false;
+      if (taskActIdsToday.has(a.id)) return false; // already covered by task record
       return true;
     });
     /* Combine: task records first, then activities-with-followup-today */
@@ -4088,7 +4088,8 @@ const DashboardModule = (() => {
       + '</div></div>'
 
       + '</div>' // card-grid-2
-      + _buildEisenhowerMatrix(myActs, allActivityTasks, stageMap, custMap, stages);
+      + _buildEisenhowerMatrix(myActs, allActivityTasks, stageMap, custMap, stages)
+      + _buildTodayActivityLogsHTML(todayStr, myActs, stageMap, custMap);
   }
 
 
@@ -4231,6 +4232,54 @@ const DashboardModule = (() => {
       +'</div></div>';
   }
 
+
+  /* ═══════════════════════════════════════════════════════════════════
+     ACTIVITIES DONE TODAY — log entries created today
+  ═══════════════════════════════════════════════════════════════════ */
+  function _buildTodayActivityLogsHTML(todayStr, myActs, stageMap, custMap) {
+    var allLogs  = DB.getAll('activityLogs');
+    var myActIds = new Set(myActs.map(function(a) { return a.id; }));
+    var todayLogs = allLogs.filter(function(l) {
+      if (!l.createdAt) return false;
+      var d = new Date(l.createdAt);
+      var ld = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+      return ld === todayStr && myActIds.has(l.activityId);
+    });
+    todayLogs.sort(function(a,b){ return new Date(b.createdAt)-new Date(a.createdAt); });
+    var typeIcon = {call:'📞',meeting:'🤝',email:'📧',note:'📝',task:'✅',status:'📌',stage:'🔄',followup:'📅',outcome:'🏁'};
+    function fmtTime(iso){ if(!iso) return ''; return new Date(iso).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}); }
+    var header = '<div class="card" style="margin-top:1.5rem">'
+      + '<div class="card-header" style="display:flex;align-items:center;justify-content:space-between">'
+      + '<h3>📋 Activities Done Today'
+      + (todayLogs.length ? ' <span class="badge badge-blue" style="margin-left:8px">'+todayLogs.length+'</span>' : '')
+      + '</h3></div>';
+    if (!todayLogs.length) {
+      return header + '<div class="card-body" style="text-align:center;padding:2rem;color:var(--text-muted)">'
+        + '<div style="font-size:28px;margin-bottom:8px">🕐</div>'
+        + '<div style="font-weight:600">No activity logged yet today</div>'
+        + '</div></div>';
+    }
+    var rows = todayLogs.map(function(log) {
+      var act  = DB.getById('activities', log.activityId);
+      var cust = act ? custMap[act.customerId] : null;
+      var stg  = act ? stageMap[act.stageId]   : null;
+      var icon = typeIcon[log.type] || '📝';
+      return '<div class="tal-row" onclick="ActivityModule.viewDetail(\'' + log.activityId + '\')" style="cursor:pointer">'
+        + '<div class="tal-icon">'+icon+'</div>'
+        + '<div class="tal-body">'
+        + '<div class="tal-cust">'+(cust?Utils.escapeHtml(cust.name):'—')
+        +(stg?' <span class="badge badge-blue" style="font-size:10px;padding:1px 6px">'+Utils.escapeHtml(stg.name)+'</span>':'')
+        +'</div>'
+        + '<div class="tal-title">'+(act?Utils.escapeHtml(act.title):'—')+'</div>'
+        + '<div class="tal-msg">'+Utils.escapeHtml(log.message||'')+'</div>'
+        + '</div>'
+        + '<div class="tal-meta"><div class="tal-time">'+fmtTime(log.createdAt)+'</div>'
+        +(log.loggedBy?'<div class="tal-by">👤 '+Utils.escapeHtml(log.loggedBy)+'</div>':'')
+        +'</div></div>';
+    }).join('');
+    return header + '<div class="card-body p0"><div class="tal-list">'+rows+'</div></div></div>';
+  }
+
   /* ── Today's task cards ── */
   function _buildTodayTasksHTML(tasks, stageMap, custMap, locMap) {
     if (!tasks.length) {
@@ -4255,23 +4304,33 @@ const DashboardModule = (() => {
       var followupLabel = a.dueDate ? ('📋 Task: ' + Utils.formatDate(a.dueDate)) : (act.nextFollowup ? ('📅 Follow-up: ' + Utils.formatDate(act.nextFollowup)) : '');
       var assignedPerson = a.assignedTo || act.assignedTo || '';
       var isDone = (a.status === 'completed');
+
       var cardBorder = isDone ? 'border-left:3px solid var(--success);opacity:0.85' : 'border-left:3px solid var(--primary)';
-      var statusBadge = isDone
-        ? ' <span class="badge badge-green" style="font-size:10px">✓ Done</span>'
-        : ' <span class="badge badge-orange" style="font-size:10px">Pending</span>';
-      var actionBtn = isDone
-        ? '<span style="font-size:12px;color:var(--success);font-weight:600">✅ Completed</span>'
-        : '<button class="btn btn-sm btn-primary ttc-btn" onclick="event.stopPropagation(); ActivityModule.viewDetail(\'' + actId + '\')">Update →</button>';
+
+      var statusBadge = isDone ? ' <span class="badge badge-green" style="font-size:10px">✓ Done</span>' : ' <span class="badge badge-orange" style="font-size:10px">Pending</span>';
+
+      var actionBtn = isDone ? '<span style="font-size:12px;color:var(--success);font-weight:600">✅ Completed</span>' : '<button class="btn btn-sm btn-primary ttc-btn" onclick="event.stopPropagation(); ActivityModule.viewDetail(\'' + actId + '\')">Update →</button>';
+
       return '<div class="today-task-card" onclick="ActivityModule.viewDetail(\'' + actId + '\')" title="Click to view" style="' + cardBorder + '">'
+
         + '<div class="ttc-left">'
+
         + '<div class="ttc-cust">' + Utils.escapeHtml(custDisplay) + statusBadge + '</div>'
+
         + '<div class="ttc-title">' + Utils.escapeHtml(a.description || act.title || '—') + '</div>'
+
         + '<div class="ttc-meta">'
+
         + (stage ? '<span class="ttc-stage">' + Utils.escapeHtml(stage.name) + '</span>' : '')
+
         + (followupLabel ? '<span class="ttc-assigned" style="color:var(--primary)">' + followupLabel + '</span>' : '') + (assignedPerson ? '<span class="ttc-assigned">👤 ' + Utils.escapeHtml(assignedPerson) + '</span>' : '')
+
         + '</div></div>'
+
         + '<div class="ttc-right">' + actionBtn + '</div>'
+
         + '</div>';
+
     }).join('');
 
     return '<div class="card" style="margin-top:1rem">'
