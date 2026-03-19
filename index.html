@@ -3693,26 +3693,23 @@ const Router = (() => {
           const dash = routes['dashboard'];
           if (dash) { content.innerHTML = ''; dash(params); }
         }
-      }, 50);
+      }, 200);
     }
   }
 
   function current() { return currentRoute; }
 
   function init() {
+    /* hashchange listener is registered at module level below — no need to add here */
     const hash = window.location.hash.replace('#', '') || 'dashboard';
     if (!Auth.isLoggedIn()) {
       render('login', {});
     } else {
       navigate(hash);
     }
-    window.addEventListener('hashchange', () => {
-      const h = window.location.hash.replace('#', '') || 'dashboard';
-      if (Auth.isLoggedIn()) navigate(h);
-    });
   }
 
-  /* Register hashchange listener immediately so back/forward browser buttons work */
+  /* Register hashchange listener immediately at module load time */
   window.addEventListener('hashchange', function() {
     const h = window.location.hash.replace('#', '') || 'dashboard';
     if (typeof Auth !== 'undefined' && Auth.isLoggedIn()) navigate(h);
@@ -4006,7 +4003,7 @@ const DashboardModule = (() => {
       /* Tab content */
       + '<div id="dash-tab-content">'
       + (_tab === 'today'
-          ? _renderTodayTab(todayTasks, overdue, stageMap, stageCounts, custMap, locMap, stages, recentActs, isAdmin, myActs, allActivityTasks, todayStr)
+          ? _renderTodayTab(todayTasks, overdue, stageMap, stageCounts, custMap, locMap, stages, recentActs, isAdmin, myActs, allActivityTasks)
           : _renderCalendarTab(myActs, custMap, stageMap))
       + '</div>'
 
@@ -4016,7 +4013,7 @@ const DashboardModule = (() => {
   /* ═══════════════════════════════════════════════════════════════════
      TODAY TAB
   ═══════════════════════════════════════════════════════════════════ */
-  function _renderTodayTab(todayTasks, overdue, stageMap, stageCounts, custMap, locMap, stages, recentActs, isAdmin, myActs, allActivityTasks, todayStr) {
+  function _renderTodayTab(todayTasks, overdue, stageMap, stageCounts, custMap, locMap, stages, recentActs, isAdmin, myActs, allActivityTasks) {
     var activeActCount = myActs.length;
     var quickBar = activeActCount
       ? '<div class="card" style="margin-top:1rem"><div class="quick-log-bar">'
@@ -4064,8 +4061,7 @@ const DashboardModule = (() => {
       + '</div></div>'
 
       + '</div>' // card-grid-2
-      + _buildEisenhowerMatrix(myActs, allActivityTasks, stageMap, custMap, stages)
-      + _buildTodayActivityLogsHTML(todayStr, myActs, stageMap, custMap);
+      + _buildEisenhowerMatrix(myActs, allActivityTasks, stageMap, custMap, stages);
   }
 
 
@@ -4206,99 +4202,6 @@ const DashboardModule = (() => {
       +'<div class="em-leg-item"><span class="em-leg-dot" style="background:#94a3b8"></span>Deprioritise: Low urgency &amp; importance</div>'
       +'</div>'
       +'</div></div>';
-  }
-
-
-  /* ═══════════════════════════════════════════════════════════════════
-     TODAY'S ACTIVITY LOG — shows all log entries created today
-     Groups by activity, shows customer, what was done, time, by whom
-  ═══════════════════════════════════════════════════════════════════ */
-  function _buildTodayActivityLogsHTML(todayStr, myActs, stageMap, custMap) {
-    var allLogs = DB.getAll('activityLogs');
-    var myActIds = new Set(myActs.map(function(a) { return a.id; }));
-
-    /* Filter logs created today that belong to this user's activities */
-    var todayLogs = allLogs.filter(function(l) {
-      if (!l.createdAt) return false;
-      /* Use local date components to avoid UTC offset issues */
-      var d = new Date(l.createdAt);
-      var localDate = d.getFullYear() + '-'
-        + String(d.getMonth() + 1).padStart(2, '0') + '-'
-        + String(d.getDate()).padStart(2, '0');
-      if (localDate !== todayStr) return false;
-      return myActIds.has(l.activityId);
-    });
-
-    /* Sort newest first */
-    todayLogs.sort(function(a, b) {
-      return new Date(b.createdAt) - new Date(a.createdAt);
-    });
-
-    /* Icon map by log type */
-    var typeIcon = {
-      call:    '📞',
-      meeting: '🤝',
-      email:   '📧',
-      note:    '📝',
-      task:    '✅',
-      status:  '📌',
-      stage:   '🔄',
-      outcome: '🏁'
-    };
-
-    function fmtTime(iso) {
-      if (!iso) return '';
-      return new Date(iso).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
-    }
-
-    /* Build the card */
-    var header = '<div class="card" style="margin-top:1.5rem">'
-      + '<div class="card-header" style="display:flex;align-items:center;justify-content:space-between">'
-      + '<h3>📋 Activities Done Today'
-      + (todayLogs.length ? ' <span class="badge badge-blue" style="margin-left:8px">' + todayLogs.length + '</span>' : '')
-      + '</h3>'
-      + '</div>';
-
-    if (!todayLogs.length) {
-      return header
-        + '<div class="card-body" style="text-align:center;padding:2rem;color:var(--text-muted)">'
-        + '<div style="font-size:28px;margin-bottom:8px">🕐</div>'
-        + '<div style="font-weight:600">No activity logged yet today</div>'
-        + '<div style="font-size:12px;margin-top:4px">Log a call or update an activity to see it here</div>'
-        + '</div></div>';
-    }
-
-    var rows = todayLogs.map(function(log) {
-      var act  = DB.getById('activities', log.activityId);
-      var cust = act ? custMap[act.customerId] : null;
-      var stage = act ? stageMap[act.stageId] : null;
-      var icon  = typeIcon[log.type] || '📝';
-      var custName  = cust ? Utils.escapeHtml(cust.name) : '—';
-      var actTitle  = act  ? Utils.escapeHtml(act.title) : '—';
-      var logMsg    = Utils.escapeHtml(log.message || '');
-      var timeStr   = fmtTime(log.createdAt);
-      var loggedBy  = log.loggedBy ? Utils.escapeHtml(log.loggedBy) : '';
-      var actId     = log.activityId;
-
-      return '<div class="tal-row" onclick="ActivityModule.viewDetail(\'' + actId + '\')" style="cursor:pointer">'
-        + '<div class="tal-icon">' + icon + '</div>'
-        + '<div class="tal-body">'
-        + '<div class="tal-cust">' + custName
-        + (stage ? ' <span class="badge badge-blue" style="font-size:10px;padding:1px 6px">' + Utils.escapeHtml(stage.name) + '</span>' : '')
-        + '</div>'
-        + '<div class="tal-title">' + actTitle + '</div>'
-        + '<div class="tal-msg">' + logMsg + '</div>'
-        + '</div>'
-        + '<div class="tal-meta">'
-        + '<div class="tal-time">' + timeStr + '</div>'
-        + (loggedBy ? '<div class="tal-by">👤 ' + loggedBy + '</div>' : '')
-        + '</div>'
-        + '</div>';
-    }).join('');
-
-    return header
-      + '<div class="card-body p0"><div class="tal-list">' + rows + '</div></div>'
-      + '</div>';
   }
 
   /* ── Today's task cards ── */
@@ -7411,15 +7314,36 @@ function _migrateActivities() {
 }
 
 const ActivityModule = (() => {
-  /* ── Upsert task: update existing pending task for same date, or insert new ── */
+  /* ── Deduplicate existing task records on startup ─────────────────────────
+     Fixes data where multiple pending tasks exist for same activity+date.
+     Keeps the latest one, marks earlier duplicates as 'deduped'.           */
+  function _deduplicateTasks() {
+    var tasks = DB.getAll('activityTasks');
+    var seen  = {};
+    var dirty = false;
+    // Sort newest first so we keep the latest
+    tasks.sort(function(a, b) { return new Date(b.createdAt||0) - new Date(a.createdAt||0); });
+    tasks.forEach(function(t) {
+      if (t.status !== 'pending') return;
+      var key = t.activityId + '|' + (t.dueDate || '');
+      if (seen[key]) {
+        // Duplicate — mark as deduped so it won't show or count
+        t.status = 'deduped';
+        dirty = true;
+      } else {
+        seen[key] = true;
+      }
+    });
+    if (dirty) DB.setStore('activityTasks', tasks);
+  }
+
+  /* ── Upsert task: update existing pending task for same date, or insert ── */
   function _upsertTask(actId, desc, dueDate) {
     if (!dueDate) return;
-    // Check for existing pending task on the same date for this activity
-    const existing = DB.query('activityTasks', function(t) {
+    var existing = DB.query('activityTasks', function(t) {
       return t.activityId === actId && t.status === 'pending' && t.dueDate === dueDate;
     });
     if (existing.length > 0) {
-      // Update the first matching task description rather than create duplicate
       DB.update('activityTasks', existing[0].id, { description: desc });
     } else {
       DB.insert('activityTasks', {
@@ -7430,6 +7354,7 @@ const ActivityModule = (() => {
       });
     }
   }
+
 
   /* ── Match activity to user: by assignedUserId (new) or assignedTo name (legacy) ── */
   function _actBelongsToUser(act, user) {
@@ -7486,6 +7411,7 @@ const ActivityModule = (() => {
   /* ── render list ── */
   function render() {
     _migrateActivities();
+    _deduplicateTasks();
     const content  = document.getElementById('main-content');
     const user     = Auth.currentUser();
     const isAdmin  = Auth.isAdmin();
@@ -7891,6 +7817,7 @@ const ActivityModule = (() => {
   /* ── detail view ── */
   function viewDetail(id) {
     _migrateActivities();
+    _deduplicateTasks();
     const a = DB.getById('activities', id);
     if (!a) { Utils.toast('Activity not found','error'); render(); return; }
 
@@ -8128,6 +8055,7 @@ const ActivityModule = (() => {
   function completeTask(taskId, actId) {
     const task = DB.getById('activityTasks', taskId);
     if (!task) { Utils.toast('Task not found', 'error'); return; }
+    // Already completed — just refresh the view silently
     if (task.status === 'completed') { viewDetail(actId); return; }
     DB.update('activityTasks', taskId, {
       status: 'completed',
