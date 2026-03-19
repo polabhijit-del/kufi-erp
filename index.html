@@ -108,7 +108,7 @@ body {
 .logo-text { color: #fff; font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; }
 .logo-sub { color: var(--sidebar-text); font-size: 10px; }
 
-.sidebar-nav { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 8px 0; }
+.sidebar-nav { flex: 1; min-height: 0; display: block; overflow-y: auto; overflow-x: hidden; padding: 8px 0; }
 .sidebar-nav::-webkit-scrollbar { width: 4px; }
 .sidebar-nav::-webkit-scrollbar-thumb { background: var(--sidebar-border); border-radius: 2px; }
 
@@ -134,6 +134,9 @@ body {
   white-space: nowrap; overflow: hidden;
   position: relative;
   z-index: 1;
+  display: flex;
+  width: 100%;
+  box-sizing: border-box;
   flex-shrink: 0;
   user-select: none;
   border-left: 3px solid transparent;
@@ -3920,21 +3923,23 @@ const DashboardModule = (() => {
 
     const myActIds = new Set(myActs.map(function(a){ return a.id; }));
     const allActivityTasks = DB.getAll('activityTasks');
-    const todayStr = today.toISOString().slice(0, 10);
+    /* Use local date components — toISOString() returns UTC which is wrong for IST users */
+    const todayStr = today.getFullYear() + '-'
+      + String(today.getMonth() + 1).padStart(2, '0') + '-'
+      + String(today.getDate()).padStart(2, '0');
 
-    /* Today's tasks — pending task records due today */
+    /* Today's tasks — pending AND completed task records for today */
     const tasksTodayRaw = allActivityTasks.filter(function(t) {
-      if (t.status !== 'pending') return false;
+      if (t.status !== 'pending' && t.status !== 'completed') return false;
       if (!myActIds.has(t.activityId)) return false;
       return (t.dueDate || '').slice(0, 10) === todayStr;
     });
-    /* ALSO include activities whose nextFollowup = today but have no task record for today
-       (the most common case — sales person sets a follow-up date on the activity itself) */
+    /* ALSO include activities whose nextFollowup = today but have no task record */
     const taskActIdsToday = new Set(tasksTodayRaw.map(function(t){ return t.activityId; }));
     const activityFollowupToday = myActs.filter(function(a) {
       if (!a.nextFollowup) return false;
       if ((a.nextFollowup || '').slice(0, 10) !== todayStr) return false;
-      if (taskActIdsToday.has(a.id)) return false; // already covered by task record
+      if (taskActIdsToday.has(a.id)) return false;
       return true;
     });
     /* Combine: task records first, then activities-with-followup-today */
@@ -4249,22 +4254,35 @@ const DashboardModule = (() => {
       var stage = stageMap[act.stageId];
       var followupLabel = a.dueDate ? ('📋 Task: ' + Utils.formatDate(a.dueDate)) : (act.nextFollowup ? ('📅 Follow-up: ' + Utils.formatDate(act.nextFollowup)) : '');
       var assignedPerson = a.assignedTo || act.assignedTo || '';
-      return '<div class="today-task-card" onclick="ActivityModule.viewDetail(\'' + actId + '\')" title="Click to update">'
+      var isDone = (a.status === 'completed');
+      var cardBorder = isDone ? 'border-left:3px solid var(--success);opacity:0.85' : 'border-left:3px solid var(--primary)';
+      var statusBadge = isDone
+        ? ' <span class="badge badge-green" style="font-size:10px">✓ Done</span>'
+        : ' <span class="badge badge-orange" style="font-size:10px">Pending</span>';
+      var actionBtn = isDone
+        ? '<span style="font-size:12px;color:var(--success);font-weight:600">✅ Completed</span>'
+        : '<button class="btn btn-sm btn-primary ttc-btn" onclick="event.stopPropagation(); ActivityModule.viewDetail(\'' + actId + '\')">Update →</button>';
+      return '<div class="today-task-card" onclick="ActivityModule.viewDetail(\'' + actId + '\')" title="Click to view" style="' + cardBorder + '">'
         + '<div class="ttc-left">'
-        + '<div class="ttc-cust">' + Utils.escapeHtml(custDisplay) + '</div>'
+        + '<div class="ttc-cust">' + Utils.escapeHtml(custDisplay) + statusBadge + '</div>'
         + '<div class="ttc-title">' + Utils.escapeHtml(a.description || act.title || '—') + '</div>'
         + '<div class="ttc-meta">'
         + (stage ? '<span class="ttc-stage">' + Utils.escapeHtml(stage.name) + '</span>' : '')
         + (followupLabel ? '<span class="ttc-assigned" style="color:var(--primary)">' + followupLabel + '</span>' : '') + (assignedPerson ? '<span class="ttc-assigned">👤 ' + Utils.escapeHtml(assignedPerson) + '</span>' : '')
         + '</div></div>'
-        + '<div class="ttc-right">'
-        + '<button class="btn btn-sm btn-primary ttc-btn" onclick="event.stopPropagation(); ActivityModule.viewDetail(\'' + actId + '\')">Update →</button>'
-        + '</div></div>';
+        + '<div class="ttc-right">' + actionBtn + '</div>'
+        + '</div>';
     }).join('');
 
     return '<div class="card" style="margin-top:1rem">'
       + '<div class="card-header" style="display:flex;align-items:center;justify-content:space-between">'
-      + '<h3>📋 Today\'s Tasks <span class="badge badge-orange" style="margin-left:8px">' + tasks.length + '</span></h3>'
+      + (function() {
+          var pendingCount   = tasks.filter(function(t){ return t.status === 'pending' || !t.status; }).length;
+          var completedCount = tasks.filter(function(t){ return t.status === 'completed'; }).length;
+          var badges = '<span class="badge badge-orange" style="margin-left:8px">' + pendingCount + ' pending</span>';
+          if (completedCount) badges += '<span class="badge badge-green" style="margin-left:4px">' + completedCount + ' done</span>';
+          return '<h3>📋 Today\'s Tasks ' + badges + '</h3>';
+        })()
       + '<button class="btn btn-sm btn-ghost" onclick="Router.navigate(\'tasks\')">Task Dashboard →</button>'
       + '</div>'
       + '<div class="card-body p0"><div class="today-tasks-list">' + rows + '</div></div>'
