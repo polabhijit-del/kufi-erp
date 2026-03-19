@@ -7382,6 +7382,9 @@ const StagesModule = (() => {
 </script>
 <script>
 /* === js/modules/activities.js === */
+
+/* === js/modules/activities.js === */
+/* === js/modules/activities.js === */
 /**
  * Sales Activity Module — v3
  *
@@ -7854,6 +7857,12 @@ const ActivityModule = (() => {
             });
           }
           DB.update('activities', a.id, data);
+          if (data.nextFollowup) {
+            _upsertTask(a.id, 'Follow up — ' + (data.title || a.title || ''), data.nextFollowup);
+          }
+          if (data.nextFollowup) {
+            _upsertTask(a.id, 'Follow up: ' + (data.title || a.title || ''), data.nextFollowup);
+          }
           Utils.toast('Activity updated');
         } else {
           // Duplicate detection: warn if this customer already has an active activity
@@ -7873,6 +7882,12 @@ const ActivityModule = (() => {
             message: `Activity created at stage: ${DB.getById('stages', stageId)?.name}`,
             loggedBy: Auth.currentUser()?.username
           });
+          if (data.nextFollowup) {
+            _upsertTask(newAct.id, 'Follow up — ' + (data.title || 'new activity'), data.nextFollowup);
+          }
+          if (data.nextFollowup) {
+            _upsertTask(newAct.id, 'Follow up: ' + (data.title || ''), data.nextFollowup);
+          }
           Utils.toast('Activity created');
         }
         Modal.close();
@@ -8665,6 +8680,8 @@ const ActivityModule = (() => {
     isActivityActive: _isActive
   };
 })();
+
+
 
 </script>
 <script>
