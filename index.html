@@ -7400,6 +7400,26 @@ function _migrateActivities() {
 }
 
 const ActivityModule = (() => {
+  /* ── Upsert task: update existing pending task for same date, or insert new ── */
+  function _upsertTask(actId, desc, dueDate) {
+    if (!dueDate) return;
+    // Check for existing pending task on the same date for this activity
+    const existing = DB.query('activityTasks', function(t) {
+      return t.activityId === actId && t.status === 'pending' && t.dueDate === dueDate;
+    });
+    if (existing.length > 0) {
+      // Update the first matching task description rather than create duplicate
+      DB.update('activityTasks', existing[0].id, { description: desc });
+    } else {
+      DB.insert('activityTasks', {
+        id: Utils.uid('TSK'), activityId: actId,
+        description: desc, dueDate: dueDate, status: 'pending',
+        createdBy: Auth.currentUser()?.username,
+        completedBy: null, completedAt: null
+      });
+    }
+  }
+
   /* ── Match activity to user: by assignedUserId (new) or assignedTo name (legacy) ── */
   function _actBelongsToUser(act, user) {
     if (!user) return false;
@@ -8097,28 +8117,18 @@ const ActivityModule = (() => {
   function completeTask(taskId, actId) {
     const task = DB.getById('activityTasks', taskId);
     if (!task) { Utils.toast('Task not found', 'error'); return; }
-    if (task.status === 'completed') { Utils.toast('Already marked done', 'info'); viewDetail(actId); return; }
-
-    /* Perform the update */
-    const updated = DB.update('activityTasks', taskId, {
+    if (task.status === 'completed') { viewDetail(actId); return; }
+    DB.update('activityTasks', taskId, {
       status: 'completed',
       completedBy: Auth.currentUser()?.username,
       completedAt: new Date().toISOString()
     });
-
-    /* Verify the update actually persisted to localStorage */
-    const verify = DB.getById('activityTasks', taskId);
-    if (!verify || verify.status !== 'completed') {
-      Utils.toast('⚠ Could not save — storage may be full. Go to Backup and export your data to free space.', 'error', 6000);
-      return;
-    }
-
     DB.insert('activityLogs', {
       id: Utils.uid('LOG'), activityId: actId, type: 'task',
       message: '✅ Task completed: ' + task.description,
       loggedBy: Auth.currentUser()?.username
     });
-    /* Update activity nextFollowup to nearest remaining pending task */
+    // Update activity nextFollowup to nearest remaining pending task
     const remaining = DB.query('activityTasks', t => t.activityId === actId && t.status === 'pending')
       .filter(t => t.dueDate).sort((a,b) => new Date(a.dueDate)-new Date(b.dueDate));
     DB.update('activities', actId, { nextFollowup: remaining[0]?.dueDate || null });
@@ -8166,12 +8176,7 @@ const ActivityModule = (() => {
         if (fdate) {
           DB.update('activities', actId, { nextFollowup: fdate });
           const desc = taskDesc || msg.slice(0, 100) + (msg.length > 100 ? '…' : '');
-          DB.insert('activityTasks', {
-            id: Utils.uid('TSK'), activityId: actId,
-            description: desc, dueDate: fdate, status: 'pending',
-            createdBy: Auth.currentUser()?.username,
-            completedBy: null, completedAt: null
-          });
+          _upsertTask(actId, desc, fdate);
           Utils.toast('Call logged & task created 📅');
         } else {
           Utils.toast('Call logged');
@@ -8262,12 +8267,7 @@ const ActivityModule = (() => {
           message: `📅 Reminder set for ${Utils.formatDate(d)} — ${note}`,
           followupDate: d, loggedBy: Auth.currentUser()?.username
         });
-        DB.insert('activityTasks', {
-          id: Utils.uid('TSK'), activityId: actId,
-          description: note, dueDate: d, status: 'pending',
-          createdBy: Auth.currentUser()?.username,
-          completedBy: null, completedAt: null
-        });
+        _upsertTask(actId, note, d);
         Utils.toast('Reminder & task created 📅');
         Modal.close();
         viewDetail(actId);
@@ -8311,12 +8311,7 @@ const ActivityModule = (() => {
         });
         if (fdate) {
           DB.update('activities', actId, { nextFollowup: fdate });
-          DB.insert('activityTasks', {
-            id: Utils.uid('TSK'), activityId: actId,
-            description: msg.slice(0,120), dueDate: fdate,
-            status: 'pending', createdBy: Auth.currentUser()?.username,
-            completedBy: null, completedAt: null
-          });
+          _upsertTask(actId, msg.slice(0,120), fdate);
         }
         Utils.toast('Entry added');
         Modal.close();
