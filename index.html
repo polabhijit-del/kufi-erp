@@ -3426,21 +3426,44 @@ const DB = (() => {
   }
 
   function setStore(name, data) {
-    localStorage.setItem(PREFIX + name, JSON.stringify(data));
+    try {
+      localStorage.setItem(PREFIX + name, JSON.stringify(data));
+    } catch(e) {
+      if (e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014)) {
+        /* localStorage full — trim audit log to free space then retry */
+        try {
+          const audit = JSON.parse(localStorage.getItem(PREFIX + 'audit') || '[]');
+          if (audit.length > 500) {
+            localStorage.setItem(PREFIX + 'audit', JSON.stringify(audit.slice(0, 500)));
+          }
+          localStorage.setItem(PREFIX + name, JSON.stringify(data));
+        } catch(e2) {
+          console.error('DB setStore failed even after audit trim:', name, e2);
+        }
+      } else {
+        console.error('DB setStore error:', name, e);
+      }
+    }
   }
 
   function getAudit() { return getStore('audit'); }
 
   function addAudit(entry) {
     const audit = getAudit();
-    audit.unshift({
+    /* Store only the field names that changed, not full record values,
+       to prevent audit store from filling localStorage */
+    const slim = {
       id: Utils.uid('AUD'),
       ts: new Date().toISOString(),
       user: (typeof Auth !== 'undefined' && Auth.currentUser()) ? Auth.currentUser().username : 'system',
       role: (typeof Auth !== 'undefined' && Auth.currentUser()) ? Auth.currentUser().role : 'system',
-      ...entry
-    });
-    if (audit.length > 10000) audit.length = 10000;
+      action:   entry.action,
+      store:    entry.store,
+      recordId: entry.recordId,
+      changes:  entry.changes ? Object.keys(entry.changes).filter(k => !['updatedAt','updatedBy'].includes(k)) : undefined
+    };
+    audit.unshift(slim);
+    if (audit.length > 2000) audit.length = 2000;
     setStore('audit', audit);
   }
 
@@ -3541,7 +3564,24 @@ const DB = (() => {
     setStore('company', comp);
   }
 
-  return { getAll, getById, insert, update, remove, softDelete, query, getAuditFor, getAudit, addAudit, seed, getStore, setStore };
+  /* One-time cleanup: trim audit to slim format if it's still bloated */
+  function trimAudit() {
+    try {
+      const raw = localStorage.getItem(PREFIX + 'audit');
+      if (!raw) return;
+      /* If audit data is > 500KB, trim it aggressively */
+      if (raw.length > 512000) {
+        const audit = JSON.parse(raw);
+        const slim = audit.slice(0, 1000).map(function(e) {
+          return { id: e.id, ts: e.ts, user: e.user, action: e.action, store: e.store, recordId: e.recordId, changes: e.changes };
+        });
+        localStorage.setItem(PREFIX + 'audit', JSON.stringify(slim));
+        console.info('DB: audit trimmed from ' + audit.length + ' to ' + slim.length + ' entries (' + Math.round(raw.length/1024) + 'KB freed)');
+      }
+    } catch(e) { console.warn('DB trimAudit error', e); }
+  }
+
+  return { getAll, getById, insert, update, remove, softDelete, query, getAuditFor, getAudit, addAudit, seed, getStore, setStore, trimAudit };
 })();
 
 </script>
@@ -6037,6 +6077,18 @@ const VendorModule = (() => {
  * Distributors are also customers (flagged).
  */
 const CustomerModule = (() => {
+  /* ── Match activity to user: by assignedUserId (new) or assignedTo name (legacy) ── */
+  function _actBelongsToUser(act, user) {
+    if (!user) return false;
+    if (act.assignedUserId) return act.assignedUserId === user.id;
+    if (act.assignedTo) {
+      var at = (act.assignedTo || '').trim().toLowerCase();
+      return at === (user.username || '').toLowerCase()
+          || at === (user.name || '').toLowerCase();
+    }
+    return false;
+  }
+
   let currentPage = 1, searchText = '', filterState = '', filterSeg = '', filterSource = '', viewMode = 'list';
 
   function render(params = {}) {
@@ -6049,7 +6101,16 @@ const CustomerModule = (() => {
     const states = DB.getAll('states');
     const sources = DB.getAll('leadSources');
 
+    /* Scope: non-admin only sees customers they have activities for */
+    const user = Auth.currentUser();
+    const isAdmin = Auth.isAdmin();
+    const _allActivities = DB.getAll('activities');
+    const _myCustomerIds = isAdmin
+      ? null  // admin sees all
+      : new Set(_allActivities.filter(a => _actBelongsToUser(a, user)).map(a => a.customerId));
+
     let filtered = customers.filter(c =>
+      (!_myCustomerIds || _myCustomerIds.has(c.id)) &&
       (!searchText || c.name.toLowerCase().includes(searchText.toLowerCase()) || c.code?.toLowerCase().includes(searchText.toLowerCase()) || c.city?.toLowerCase().includes(searchText.toLowerCase())) &&
       (!filterState || c.state === filterState) &&
       (!filterSeg || c.segment === filterSeg) &&
@@ -6057,7 +6118,6 @@ const CustomerModule = (() => {
     );
 
     const pg = Utils.paginate(filtered, currentPage, 15);
-    const user = Auth.currentUser();
 
     content.innerHTML = `
       <div class="page-header">
@@ -7340,6 +7400,18 @@ function _migrateActivities() {
 }
 
 const ActivityModule = (() => {
+  /* ── Match activity to user: by assignedUserId (new) or assignedTo name (legacy) ── */
+  function _actBelongsToUser(act, user) {
+    if (!user) return false;
+    if (act.assignedUserId) return act.assignedUserId === user.id;
+    if (act.assignedTo) {
+      var at = (act.assignedTo || '').trim().toLowerCase();
+      return at === (user.username || '').toLowerCase()
+          || at === (user.name || '').toLowerCase();
+    }
+    return false;
+  }
+
   let currentPage   = 1;
   let filterStage   = '';
   let searchText    = '';
@@ -7392,7 +7464,7 @@ const ActivityModule = (() => {
     const allActs  = DB.getAll('activities');
 
     let filtered = allActs.filter(a => {
-      if (!isAdmin && a.assignedUserId !== user.id) return false;
+      if (!isAdmin && !_actBelongsToUser(a, user)) return false;
       if (filterStage   && a.stageId !== filterStage)          return false;
       const out = _outcome(a);
       if (filterOutcome && out !== filterOutcome)               return false;
@@ -7484,7 +7556,7 @@ const ActivityModule = (() => {
       <div class="card"><div class="card-body p0 table-wrap">
         ${Utils.buildTable(
           [
-            {label:"<input type='checkbox' id='act-check-all' onclick='ActivityModule.toggleAll(this.checked)' title='Select all'>", width:'36px'},
+            {label:"Check", width:'36px'},
             {label:'Customer'},
             {label:'Title'},
             {label:'Stage',       width:'110px'},
@@ -7529,7 +7601,9 @@ const ActivityModule = (() => {
     // Column index map: 0=chk, 1=customer, 2=title, 3=stage, 4=contact, 5=assigned, 6=followup, 7=age, 8=value, 9=outcome, 10=actions
     const _sortColMap = { customer:1, title:2, stage:3, followup:6, updatedAt:7, value:8 };
     const _sortLabels = { customer:'Customer', title:'Title', stage:'Stage', followup:'Follow-up', updatedAt:'Age', value:'Value' };
-    const ths = document.querySelectorAll('.card .data-table thead th');
+    /* Scope to the activities table specifically - find the table inside .card-body.p0 */
+    const _actTable = document.querySelector('#main-content .table-wrap .data-table');
+    const ths = _actTable ? _actTable.querySelectorAll('thead th') : [];
     Object.entries(_sortColMap).forEach(([field, colIdx]) => {
       const th = ths[colIdx];
       if (!th) return;
@@ -8022,18 +8096,29 @@ const ActivityModule = (() => {
   /* ── complete a task ── */
   function completeTask(taskId, actId) {
     const task = DB.getById('activityTasks', taskId);
-    if (!task) return;
-    DB.update('activityTasks', taskId, {
+    if (!task) { Utils.toast('Task not found', 'error'); return; }
+    if (task.status === 'completed') { Utils.toast('Already marked done', 'info'); viewDetail(actId); return; }
+
+    /* Perform the update */
+    const updated = DB.update('activityTasks', taskId, {
       status: 'completed',
       completedBy: Auth.currentUser()?.username,
       completedAt: new Date().toISOString()
     });
+
+    /* Verify the update actually persisted to localStorage */
+    const verify = DB.getById('activityTasks', taskId);
+    if (!verify || verify.status !== 'completed') {
+      Utils.toast('⚠ Could not save — storage may be full. Go to Backup and export your data to free space.', 'error', 6000);
+      return;
+    }
+
     DB.insert('activityLogs', {
       id: Utils.uid('LOG'), activityId: actId, type: 'task',
-      message: `✅ Task completed: ${task.description}`,
+      message: '✅ Task completed: ' + task.description,
       loggedBy: Auth.currentUser()?.username
     });
-    // Update activity nextFollowup to nearest remaining pending task
+    /* Update activity nextFollowup to nearest remaining pending task */
     const remaining = DB.query('activityTasks', t => t.activityId === actId && t.status === 'pending')
       .filter(t => t.dueDate).sort((a,b) => new Date(a.dueDate)-new Date(b.dueDate));
     DB.update('activities', actId, { nextFollowup: remaining[0]?.dueDate || null });
@@ -8546,7 +8631,7 @@ const ActivityModule = (() => {
 /**
  * ── AI INSIGHTS — API KEY MANAGEMENT ─────────────────────────────────────
  * Key stored in localStorage under 'kufi_ai_key'.
- * Calls Anthropic API directly (CORS enabled). Works on GitHub Pages.
+ * Calls Anthropic API directly (CORS). Works on GitHub Pages and local server.
  */
 function _getAIKey() {
   return localStorage.getItem('kufi_ai_key') || '';
@@ -8601,7 +8686,7 @@ function _promptAIKey(onSuccess) {
 
 /**
  * ── SHARED AI INSIGHTS RENDERER ──────────────────────────────────────────
- * Posts directly to Anthropic API with CORS headers. No server needed.
+ * Posts directly to Anthropic API with CORS headers. No local server needed.
  */
 function _renderAIInsights(containerId, prompt) {
   var el = document.getElementById(containerId);
@@ -8912,6 +8997,18 @@ function _buildSalesBreakdownHTML(activities, customers, employees, stageMap, co
 }
 
 const TaskModule = (() => {
+  /* ── Match activity to user: by assignedUserId (new) or assignedTo name (legacy) ── */
+  function _actBelongsToUser(act, user) {
+    if (!user) return false;
+    if (act.assignedUserId) return act.assignedUserId === user.id;
+    if (act.assignedTo) {
+      var at = (act.assignedTo || '').trim().toLowerCase();
+      return at === (user.username || '').toLowerCase()
+          || at === (user.name || '').toLowerCase();
+    }
+    return false;
+  }
+
   function render() {
     const content = document.getElementById('main-content');
     const user = Auth.currentUser();
@@ -8920,7 +9017,7 @@ const TaskModule = (() => {
     today.setHours(0,0,0,0);
 
     const activities  = DB.getAll('activities').filter(a => a.isActive);
-    const myActivities = isAdmin ? activities : activities.filter(a => a.assignedUserId === user.id);
+    const myActivities = isAdmin ? activities : activities.filter(a => _actBelongsToUser(a, user));
     const stages      = DB.getAll('stages').sort((a,b) => a.order - b.order);
     const stageMap    = Object.fromEntries(stages.map(s => [s.id, s]));
     const customers   = DB.getAll('customers');
@@ -9063,7 +9160,7 @@ const TaskModule = (() => {
       <!-- Lost / Declined / Closed Outcome Summary -->
       ${(() => {
         const allActs    = DB.getAll('activities');
-        const scopeActs  = isAdmin ? allActs : allActs.filter(a => a.assignedUserId === user.id);
+        const scopeActs  = isAdmin ? allActs : allActs.filter(a => _actBelongsToUser(a, user));
         const _outcome   = a => a.outcomeStatus || (a.isActive === false ? 'lost' : 'active');
         const lostActs   = scopeActs.filter(a => _outcome(a) === 'lost');
         const declActs   = scopeActs.filter(a => _outcome(a) === 'declined');
@@ -9242,7 +9339,7 @@ const TaskModule = (() => {
     const isAdmin   = Auth.isAdmin();
     const stage     = DB.getById('stages', stageId);
     const allActs   = DB.getAll('activities').filter(a => a.isActive);
-    const myActs    = isAdmin ? allActs : allActs.filter(a => a.assignedUserId === user.id);
+    const myActs    = isAdmin ? allActs : allActs.filter(a => _actBelongsToUser(a, user));
     const stageActs = myActs.filter(a => a.stageId === stageId);
     const customers = DB.getAll('customers');
     const custMap2  = Object.fromEntries(customers.map(c => [c.id, c]));
@@ -12174,6 +12271,7 @@ const BulkEditModule = (() => {
 
   // ── INIT ──────────────────────────────────────────
   DB.seed();
+  DB.trimAudit();
   Auth.init();
   registerRoutes();
 
