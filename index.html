@@ -3658,54 +3658,67 @@ const Router = (() => {
     routes[name] = handler;
   }
 
-  /* Update sidebar highlight — only exact match gets active class */
-  function setActive(name) {
-    document.querySelectorAll('.nav-item[data-route]').forEach(function(el) {
-      el.classList.toggle('active', el.dataset.route === name);
-    });
-  }
-
-  function navigate(name, params) {
-    params = params || {};
+  function navigate(name, params = {}) {
     if (!Auth.isLoggedIn() && name !== 'login') {
-      _render('login', {});
+      render('login', {});
       return;
     }
     currentRoute = name;
-    _render(name, params);
-    try { window.location.hash = name; } catch(e) {}
-    setActive(name);
+    render(name, params);
+    // Update URL hash
+    window.location.hash = name;
+    // Update active nav
+    document.querySelectorAll('.nav-item').forEach(el => {
+      el.classList.toggle('active', el.dataset.route === name || (el.dataset.routeGroup && name.startsWith(el.dataset.routeGroup)));
+    });
   }
 
-  function _render(name, params) {
-    var handler = routes[name];
-    var content = document.getElementById('main-content');
+  function render(name, params) {
+    const handler = routes[name];
+    const content = document.getElementById('main-content');
     if (!content) return;
     if (handler) {
       content.innerHTML = '';
       handler(params);
-    } else {
-      content.innerHTML = '<div class="page-error"><h2>Page not found: ' + name + '</h2></div>';
+    } else if (name && name !== 'login') {
+      /* Route not found - may be called before registerRoutes().
+         Retry once after a tick to handle timing issues. */
+      setTimeout(function() {
+        const h2 = routes[name];
+        if (h2) {
+          content.innerHTML = '';
+          h2(params);
+        } else {
+          /* Fall back to dashboard rather than showing error */
+          const dash = routes['dashboard'];
+          if (dash) { content.innerHTML = ''; dash(params); }
+        }
+      }, 50);
     }
   }
 
   function current() { return currentRoute; }
 
   function init() {
-    var hash = window.location.hash.replace('#', '') || 'dashboard';
+    const hash = window.location.hash.replace('#', '') || 'dashboard';
     if (!Auth.isLoggedIn()) {
-      _render('login', {});
+      render('login', {});
     } else {
       navigate(hash);
     }
-    window.addEventListener('hashchange', function() {
-      var h = window.location.hash.replace('#', '') || 'dashboard';
+    window.addEventListener('hashchange', () => {
+      const h = window.location.hash.replace('#', '') || 'dashboard';
       if (Auth.isLoggedIn()) navigate(h);
     });
   }
 
-  /* Expose render for internal use by modules */
-  return { register, navigate, current, init, setActive };
+  /* Register hashchange listener immediately so back/forward browser buttons work */
+  window.addEventListener('hashchange', function() {
+    const h = window.location.hash.replace('#', '') || 'dashboard';
+    if (typeof Auth !== 'undefined' && Auth.isLoggedIn()) navigate(h);
+  });
+
+  return { register, navigate, render, current, init };
 })();
 
 </script>
@@ -4515,9 +4528,7 @@ const DashboardModule = (() => {
           message:msg, followupDate:fdate||null, loggedBy:Auth.currentUser()?.username });
         if (fdate) {
           DB.update('activities', actId, { nextFollowup: fdate });
-          DB.insert('activityTasks', { id:Utils.uid('TSK'), activityId:actId,
-            description: tdesc||msg.slice(0,100), dueDate:fdate, status:'pending',
-            createdBy:Auth.currentUser()?.username, completedBy:null, completedAt:null });
+          ActivityModule.upsertTask(actId, tdesc||msg.slice(0,100), fdate);
           Utils.toast('Logged & task created 📅');
         } else { Utils.toast('Call logged ✓'); }
         Modal.close(); render();
@@ -8612,7 +8623,7 @@ const ActivityModule = (() => {
     toggleSelect, toggleAll, clearSelection, bulkMoveStage,
     show360, hide360, switchLogView, importCSV,
     addLog, logFollowup, logKeyUpdate, logSupport, setFollowup,
-    moveStage, completeTask, _onCustChange,
+    moveStage, completeTask, upsertTask: _upsertTask, _onCustChange,
     _onLocChange,
     // Exposed for dashboards
     outcomeOf: _outcome,
