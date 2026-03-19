@@ -78,6 +78,7 @@ body {
 #sidebar {
   width: var(--sidebar-w);
   height: 100vh;
+  height: 100dvh; /* dynamic viewport height for mobile browsers */
   background: var(--sidebar-bg);
   display: flex;
   flex-direction: column;
@@ -107,7 +108,7 @@ body {
 .logo-text { color: #fff; font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; }
 .logo-sub { color: var(--sidebar-text); font-size: 10px; }
 
-.sidebar-nav { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 0; }
+.sidebar-nav { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 8px 0; }
 .sidebar-nav::-webkit-scrollbar { width: 4px; }
 .sidebar-nav::-webkit-scrollbar-thumb { background: var(--sidebar-border); border-radius: 2px; }
 
@@ -132,6 +133,8 @@ body {
   transition: background 0.15s ease, color 0.15s ease, border-left-color 0.15s ease;
   white-space: nowrap; overflow: hidden;
   position: relative;
+  z-index: 1;
+  flex-shrink: 0;
   user-select: none;
   border-left: 3px solid transparent;
   margin: 0;
@@ -12232,7 +12235,7 @@ const BulkEditModule = (() => {
 
   // ── INIT ──────────────────────────────────────────
   DB.seed();
-  DB.trimAudit();
+  if (DB.trimAudit) DB.trimAudit();
   Auth.init();
   registerRoutes();
 
