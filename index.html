@@ -2699,6 +2699,52 @@ body.dark-mode .em-q-header { background: #1e293b; }
 }
 
 
+
+/* ── TODAY'S ACTIVITY LOG CARD ──────────────────────── */
+.tal-list { display: flex; flex-direction: column; }
+.tal-row {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border);
+  transition: background var(--transition);
+}
+.tal-row:last-child { border-bottom: none; }
+.tal-row:hover { background: var(--bg); }
+.tal-icon { font-size: 18px; min-width: 24px; padding-top: 2px; }
+.tal-body { flex: 1; min-width: 0; }
+.tal-cust {
+  font-size: 13px; font-weight: 600; color: var(--text);
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-bottom: 2px;
+}
+.tal-title {
+  font-size: 12px; color: var(--text-muted);
+  margin-bottom: 3px;
+}
+.tal-msg {
+  font-size: 12px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 100%;
+}
+.tal-meta {
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: 4px; min-width: 70px; flex-shrink: 0;
+}
+.tal-time {
+  font-size: 11px; font-weight: 600; color: var(--primary);
+  white-space: nowrap;
+}
+.tal-by {
+  font-size: 10px; color: var(--text-muted); white-space: nowrap;
+}
+
+/* Mobile adjustments */
+@media (max-width: 768px) {
+  .tal-row { padding: 10px 14px; gap: 8px; }
+  .tal-msg { white-space: normal; }
+  .tal-meta { min-width: 60px; }
+}
+
 /* ════════════════════════════════════════════════════════════
    KUFI ERP — RESPONSIVE / MULTI-DEVICE ADDITIONS
    Targets: Android phone, iPad/tablet, laptop
@@ -3907,7 +3953,7 @@ const DashboardModule = (() => {
       /* Tab content */
       + '<div id="dash-tab-content">'
       + (_tab === 'today'
-          ? _renderTodayTab(todayTasks, overdue, stageMap, stageCounts, custMap, locMap, stages, recentActs, isAdmin, myActs, allActivityTasks)
+          ? _renderTodayTab(todayTasks, overdue, stageMap, stageCounts, custMap, locMap, stages, recentActs, isAdmin, myActs, allActivityTasks, todayStr)
           : _renderCalendarTab(myActs, custMap, stageMap))
       + '</div>'
 
@@ -3917,7 +3963,7 @@ const DashboardModule = (() => {
   /* ═══════════════════════════════════════════════════════════════════
      TODAY TAB
   ═══════════════════════════════════════════════════════════════════ */
-  function _renderTodayTab(todayTasks, overdue, stageMap, stageCounts, custMap, locMap, stages, recentActs, isAdmin, myActs, allActivityTasks) {
+  function _renderTodayTab(todayTasks, overdue, stageMap, stageCounts, custMap, locMap, stages, recentActs, isAdmin, myActs, allActivityTasks, todayStr) {
     var activeActCount = myActs.length;
     var quickBar = activeActCount
       ? '<div class="card" style="margin-top:1rem"><div class="quick-log-bar">'
@@ -3965,7 +4011,8 @@ const DashboardModule = (() => {
       + '</div></div>'
 
       + '</div>' // card-grid-2
-      + _buildEisenhowerMatrix(myActs, allActivityTasks, stageMap, custMap, stages);
+      + _buildEisenhowerMatrix(myActs, allActivityTasks, stageMap, custMap, stages)
+      + _buildTodayActivityLogsHTML(todayStr, myActs, stageMap, custMap);
   }
 
 
@@ -4106,6 +4153,99 @@ const DashboardModule = (() => {
       +'<div class="em-leg-item"><span class="em-leg-dot" style="background:#94a3b8"></span>Deprioritise: Low urgency &amp; importance</div>'
       +'</div>'
       +'</div></div>';
+  }
+
+
+  /* ═══════════════════════════════════════════════════════════════════
+     TODAY'S ACTIVITY LOG — shows all log entries created today
+     Groups by activity, shows customer, what was done, time, by whom
+  ═══════════════════════════════════════════════════════════════════ */
+  function _buildTodayActivityLogsHTML(todayStr, myActs, stageMap, custMap) {
+    var allLogs = DB.getAll('activityLogs');
+    var myActIds = new Set(myActs.map(function(a) { return a.id; }));
+
+    /* Filter logs created today that belong to this user's activities */
+    var todayLogs = allLogs.filter(function(l) {
+      if (!l.createdAt) return false;
+      /* Use local date components to avoid UTC offset issues */
+      var d = new Date(l.createdAt);
+      var localDate = d.getFullYear() + '-'
+        + String(d.getMonth() + 1).padStart(2, '0') + '-'
+        + String(d.getDate()).padStart(2, '0');
+      if (localDate !== todayStr) return false;
+      return myActIds.has(l.activityId);
+    });
+
+    /* Sort newest first */
+    todayLogs.sort(function(a, b) {
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    });
+
+    /* Icon map by log type */
+    var typeIcon = {
+      call:    '📞',
+      meeting: '🤝',
+      email:   '📧',
+      note:    '📝',
+      task:    '✅',
+      status:  '📌',
+      stage:   '🔄',
+      outcome: '🏁'
+    };
+
+    function fmtTime(iso) {
+      if (!iso) return '';
+      return new Date(iso).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    }
+
+    /* Build the card */
+    var header = '<div class="card" style="margin-top:1.5rem">'
+      + '<div class="card-header" style="display:flex;align-items:center;justify-content:space-between">'
+      + '<h3>📋 Activities Done Today'
+      + (todayLogs.length ? ' <span class="badge badge-blue" style="margin-left:8px">' + todayLogs.length + '</span>' : '')
+      + '</h3>'
+      + '</div>';
+
+    if (!todayLogs.length) {
+      return header
+        + '<div class="card-body" style="text-align:center;padding:2rem;color:var(--text-muted)">'
+        + '<div style="font-size:28px;margin-bottom:8px">🕐</div>'
+        + '<div style="font-weight:600">No activity logged yet today</div>'
+        + '<div style="font-size:12px;margin-top:4px">Log a call or update an activity to see it here</div>'
+        + '</div></div>';
+    }
+
+    var rows = todayLogs.map(function(log) {
+      var act  = DB.getById('activities', log.activityId);
+      var cust = act ? custMap[act.customerId] : null;
+      var stage = act ? stageMap[act.stageId] : null;
+      var icon  = typeIcon[log.type] || '📝';
+      var custName  = cust ? Utils.escapeHtml(cust.name) : '—';
+      var actTitle  = act  ? Utils.escapeHtml(act.title) : '—';
+      var logMsg    = Utils.escapeHtml(log.message || '');
+      var timeStr   = fmtTime(log.createdAt);
+      var loggedBy  = log.loggedBy ? Utils.escapeHtml(log.loggedBy) : '';
+      var actId     = log.activityId;
+
+      return '<div class="tal-row" onclick="ActivityModule.viewDetail(\'' + actId + '\')" style="cursor:pointer">'
+        + '<div class="tal-icon">' + icon + '</div>'
+        + '<div class="tal-body">'
+        + '<div class="tal-cust">' + custName
+        + (stage ? ' <span class="badge badge-blue" style="font-size:10px;padding:1px 6px">' + Utils.escapeHtml(stage.name) + '</span>' : '')
+        + '</div>'
+        + '<div class="tal-title">' + actTitle + '</div>'
+        + '<div class="tal-msg">' + logMsg + '</div>'
+        + '</div>'
+        + '<div class="tal-meta">'
+        + '<div class="tal-time">' + timeStr + '</div>'
+        + (loggedBy ? '<div class="tal-by">👤 ' + loggedBy + '</div>' : '')
+        + '</div>'
+        + '</div>';
+    }).join('');
+
+    return header
+      + '<div class="card-body p0"><div class="tal-list">' + rows + '</div></div>'
+      + '</div>';
   }
 
   /* ── Today's task cards ── */
