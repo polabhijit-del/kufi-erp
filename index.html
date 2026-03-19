@@ -3649,69 +3649,88 @@ const Auth = (() => {
 /* === js/core/router.js === */
 /**
  * Single Page Application Router
+ * Robust against being called before or after registerRoutes()
  */
 const Router = (() => {
-  const routes = {};
-  let currentRoute = null;
+  const routes  = {};
+  let currentRoute  = null;
+  let _pendingRoute = null;   // queued if navigate() called before routes registered
+  let _pendingParams= {};
 
   function register(name, handler) {
     routes[name] = handler;
+    /* If a navigation was queued while routes weren't ready, flush it now */
+    if (_pendingRoute) {
+      var pr = _pendingRoute, pp = _pendingParams;
+      _pendingRoute = null; _pendingParams = {};
+      navigate(pr, pp);
+    }
   }
 
-  function navigate(name, params = {}) {
+  function navigate(name, params) {
+    params = params || {};
     if (!Auth.isLoggedIn() && name !== 'login') {
-      render('login', {});
+      _doRender('login', {});
+      return;
+    }
+    /* If no routes registered yet, queue and wait */
+    if (Object.keys(routes).length === 0) {
+      _pendingRoute  = name;
+      _pendingParams = params;
       return;
     }
     currentRoute = name;
-    render(name, params);
-    // Update URL hash
+    _doRender(name, params);
     window.location.hash = name;
-    // Update active nav
-    document.querySelectorAll('.nav-item').forEach(el => {
-      el.classList.toggle('active', el.dataset.route === name || (el.dataset.routeGroup && name.startsWith(el.dataset.routeGroup)));
+    document.querySelectorAll('.nav-item').forEach(function(el) {
+      el.classList.toggle('active',
+        el.dataset.route === name ||
+        (el.dataset.routeGroup && name.startsWith(el.dataset.routeGroup))
+      );
     });
   }
 
-  function render(name, params) {
-    const handler = routes[name];
-    const content = document.getElementById('main-content');
+  function _doRender(name, params) {
+    var handler = routes[name];
+    var content = document.getElementById('main-content');
     if (!content) return;
     if (handler) {
       content.innerHTML = '';
       handler(params);
     } else if (name && name !== 'login') {
-      /* Route not found - may be called before registerRoutes().
-         Retry once after a tick to handle timing issues. */
+      /* Route not registered yet — retry after routes are likely loaded */
       setTimeout(function() {
-        const h2 = routes[name];
+        var h2 = routes[name];
         if (h2) {
           content.innerHTML = '';
           h2(params);
         } else {
-          /* Fall back to dashboard rather than showing error */
-          const dash = routes['dashboard'];
+          /* Last resort: go to dashboard */
+          var dash = routes['dashboard'];
           if (dash) { content.innerHTML = ''; dash(params); }
         }
-      }, 200);
+      }, 300);
     }
   }
+
+  /* Keep render() as public alias for compatibility */
+  function render(name, params) { _doRender(name, params || {}); }
 
   function current() { return currentRoute; }
 
   function init() {
-    /* hashchange listener is registered at module level below — no need to add here */
-    const hash = window.location.hash.replace('#', '') || 'dashboard';
+    /* Called by old index.html versions — safe to call, just navigates */
+    var hash = window.location.hash.replace('#', '') || 'dashboard';
     if (!Auth.isLoggedIn()) {
-      render('login', {});
+      _doRender('login', {});
     } else {
       navigate(hash);
     }
   }
 
-  /* Register hashchange listener immediately at module load time */
+  /* hashchange — handles browser back/forward */
   window.addEventListener('hashchange', function() {
-    const h = window.location.hash.replace('#', '') || 'dashboard';
+    var h = window.location.hash.replace('#', '') || 'dashboard';
     if (typeof Auth !== 'undefined' && Auth.isLoggedIn()) navigate(h);
   });
 
@@ -7340,19 +7359,27 @@ const ActivityModule = (() => {
   /* ── Upsert task: update existing pending task for same date, or insert ── */
   function _upsertTask(actId, desc, dueDate) {
     if (!dueDate) return;
-    var existing = DB.query('activityTasks', function(t) {
-      return t.activityId === actId && t.status === 'pending' && t.dueDate === dueDate;
+    // Check for any existing task (pending OR completed) for same activity+date
+    // Prevents creating a new pending task after a completed one for the same date
+    var anyExisting = DB.query('activityTasks', function(t) {
+      return t.activityId === actId && t.dueDate === dueDate
+          && (t.status === 'pending' || t.status === 'completed');
     });
-    if (existing.length > 0) {
-      DB.update('activityTasks', existing[0].id, { description: desc });
-    } else {
-      DB.insert('activityTasks', {
-        id: Utils.uid('TSK'), activityId: actId,
-        description: desc, dueDate: dueDate, status: 'pending',
-        createdBy: Auth.currentUser()?.username,
-        completedBy: null, completedAt: null
-      });
+    if (anyExisting.length > 0) {
+      // If pending: update description. If completed: do nothing (task is done).
+      var pending = anyExisting.filter(function(t){ return t.status === 'pending'; });
+      if (pending.length > 0) {
+        DB.update('activityTasks', pending[0].id, { description: desc });
+      }
+      // Completed task exists for this date — no new task needed
+      return;
     }
+    DB.insert('activityTasks', {
+      id: Utils.uid('TSK'), activityId: actId,
+      description: desc, dueDate: dueDate, status: 'pending',
+      createdBy: Auth.currentUser()?.username,
+      completedBy: null, completedAt: null
+    });
   }
 
 
@@ -7833,7 +7860,7 @@ const ActivityModule = (() => {
 
     const logs  = DB.query('activityLogs', l => l.activityId === id)
                     .sort((x,y) => new Date(y.createdAt) - new Date(x.createdAt));
-    const tasks = DB.query('activityTasks', t => t.activityId === id)
+    const tasks = DB.query('activityTasks', t => t.activityId === id && t.status !== 'deduped')
                     .sort((x,y) => new Date(x.dueDate||x.createdAt) - new Date(y.dueDate||y.createdAt));
     const pendingTasks   = tasks.filter(t => t.status === 'pending');
     const overdueTasks   = pendingTasks.filter(t => t.dueDate && isOverdue(t.dueDate));
