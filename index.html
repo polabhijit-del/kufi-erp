@@ -3360,7 +3360,7 @@ const Utils = (() => {
 
   function buildTable(headers, rows, opts = {}) {
     const colgroup = headers.map((h, i) => `<col style="${h.width ? 'width:'+h.width : ''}">`).join('');
-    const thead = `<thead><tr>${headers.map(h => { const lbl = h.label || h; return `<th>${typeof lbl === 'string' && lbl.includes('<') ? lbl : escapeHtml(lbl)}</th>`; }).join('')}</tr></thead>`;
+    const thead = `<thead><tr>${headers.map(h => `<th>${escapeHtml(h.label || h)}</th>`).join('')}</tr></thead>`;
     const tbody = rows.length ? `<tbody>${rows.map(r => `<tr>${r}</tr>`).join('')}</tbody>` : `<tbody><tr><td colspan="${headers.length}" class="empty-row">No records found</td></tr></tbody>`;
     return `<table class="data-table ${opts.class||''}"><colgroup>${colgroup}</colgroup>${thead}${tbody}</table>`;
   }
@@ -8672,7 +8672,7 @@ const ActivityModule = (() => {
 /**
  * ── AI INSIGHTS — API KEY MANAGEMENT ─────────────────────────────────────
  * Key stored in localStorage under 'kufi_ai_key'.
- * Calls Anthropic API directly (CORS). Works on GitHub Pages and local server.
+ * Sent to local /ai-proxy which forwards to Anthropic with proper headers.
  */
 function _getAIKey() {
   return localStorage.getItem('kufi_ai_key') || '';
@@ -8727,7 +8727,7 @@ function _promptAIKey(onSuccess) {
 
 /**
  * ── SHARED AI INSIGHTS RENDERER ──────────────────────────────────────────
- * Posts directly to Anthropic API with CORS headers. No local server needed.
+ * Posts to local /ai-proxy (which forwards to Anthropic with the API key).
  */
 function _renderAIInsights(containerId, prompt) {
   var el = document.getElementById(containerId);
