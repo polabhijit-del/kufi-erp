@@ -12117,7 +12117,7 @@ const BulkEditModule = (() => {
 
     // Show/hide admin nav items
     const isAdmin = Auth.isAdmin();
-    const adminItems = document.querySelectorAll('#nav-users, #nav-audit, #nav-backup, #nav-purge, #nav-bulkedit');
+    const adminItems = document.querySelectorAll('#nav-users, #nav-audit, #nav-backup, #nav-purge, #nav-bulkedit, #admin-nav-label');
     adminItems.forEach(el => el.style.display = isAdmin ? 'flex' : 'none');
     if (document.getElementById('admin-nav-label')) {
       document.getElementById('admin-nav-label').style.display = isAdmin ? 'block' : 'none';
