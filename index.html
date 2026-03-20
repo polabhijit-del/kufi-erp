@@ -3856,6 +3856,8 @@ const Modal = (() => {
 <!-- Modules -->
 <script>
 /* === js/modules/dashboard.js === */
+
+/* === js/modules/dashboard.js === */
 /**
  * Main Dashboard Module
  * ─────────────────────────────────────────────────────────────────────────────
@@ -3925,7 +3927,9 @@ const DashboardModule = (() => {
 
     const myActIds = new Set(myActs.map(function(a){ return a.id; }));
     const allActivityTasks = DB.getAll('activityTasks');
-    const todayStr = today.toISOString().slice(0, 10);
+    const todayStr = today.getFullYear() + '-'
+      + String(today.getMonth() + 1).padStart(2, '0') + '-'
+      + String(today.getDate()).padStart(2, '0');
 
     /* Today's tasks — pending AND completed task records for today */
     const tasksTodayRaw = allActivityTasks.filter(function(t) {
@@ -4030,7 +4034,7 @@ const DashboardModule = (() => {
       /* Tab content */
       + '<div id="dash-tab-content">'
       + (_tab === 'today'
-          ? _renderTodayTab(todayTasks, overdue, stageMap, stageCounts, custMap, locMap, stages, recentActs, isAdmin, myActs, allActivityTasks)
+          ? _renderTodayTab(todayTasks, overdue, stageMap, stageCounts, custMap, locMap, stages, recentActs, isAdmin, myActs, allActivityTasks, todayStr)
           : _renderCalendarTab(myActs, custMap, stageMap))
       + '</div>'
 
@@ -4040,7 +4044,7 @@ const DashboardModule = (() => {
   /* ═══════════════════════════════════════════════════════════════════
      TODAY TAB
   ═══════════════════════════════════════════════════════════════════ */
-  function _renderTodayTab(todayTasks, overdue, stageMap, stageCounts, custMap, locMap, stages, recentActs, isAdmin, myActs, allActivityTasks) {
+  function _renderTodayTab(todayTasks, overdue, stageMap, stageCounts, custMap, locMap, stages, recentActs, isAdmin, myActs, allActivityTasks, todayStr) {
     var activeActCount = myActs.length;
     var quickBar = activeActCount
       ? '<div class="card" style="margin-top:1rem"><div class="quick-log-bar">'
@@ -4684,6 +4688,7 @@ const AuditModule = (() => {
 
   return { render, goPage };
 })();
+
 
 </script>
 <script>
