@@ -3000,6 +3000,7 @@ body.dark-mode .em-q-header { background: #1e293b; }
 
   </style>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a6ebd'/><text x='16' y='22' font-family='sans-serif' font-size='16' font-weight='700' fill='white' text-anchor='middle'>K</text></svg>">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
@@ -3049,7 +3050,8 @@ body.dark-mode .em-q-header { background: #1e293b; }
         <input class="form-input" id="login-pwd" type="password" placeholder="Enter password" autocomplete="current-password">
       </div>
       <div id="login-err" class="login-error" style="display:none"></div>
-      <button class="login-btn" onclick="doLogin()">Sign In</button>
+      <div id="login-drive-status" style="display:none;text-align:center;font-size:12px;padding:8px;border-radius:6px;background:var(--bg);margin-top:8px"></div>
+          <button<button class="login-btn" onclick="doLogin()">Sign In</button>
     </div>
     <p style="text-align:center;font-size:11px;color:var(--text-muted);margin-top:20px;">
       Default: admin / Admin@123
@@ -3210,6 +3212,12 @@ body.dark-mode .em-q-header { background: #1e293b; }
     <div class="header-actions">
       <button id="gs-trigger" onclick="gsOpen()" title="Search (Ctrl+K)" style="background:none;border:1px solid var(--border);border-radius:6px;padding:5px 10px;cursor:pointer;color:var(--text-muted);font-size:12px;display:flex;align-items:center;gap:5px">
         🔍 <span style="opacity:.6">Ctrl+K</span>
+      </button>
+      <div id="drive-sync-status" onclick="DriveSync.backup(false)" title="Click to sync now"
+        style="display:none;align-items:center;gap:4px;font-size:12px;color:var(--text-muted);white-space:nowrap;cursor:pointer;padding:4px 8px;border-radius:6px;border:1px solid var(--border)"></div>
+      <button id="drive-connect-btn" onclick="DriveSync.connect()" title="Connect Google Drive"
+        style="display:flex;align-items:center;gap:5px;padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);cursor:pointer;font-size:12px;color:var(--text-muted)">
+        ☁ <span id="drive-btn-label">Drive</span>
       </button>
       <span id="reminder-badge" style="display:none"></span>
       <div class="header-user-pill" onclick="UserModule.changeMyPassword()" title="Change password">
@@ -3442,6 +3450,7 @@ const DB = (() => {
   function setStore(name, data) {
     try {
       localStorage.setItem(PREFIX + name, JSON.stringify(data));
+      if (typeof DriveSync !== 'undefined') DriveSync.markDirty();
     } catch(e) {
       if (e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014)) {
         /* localStorage full — trim audit log to free space then retry */
@@ -12006,6 +12015,386 @@ const BulkEditModule = (() => {
 <!--  APPLICATION BOOTSTRAP                             -->
 <!-- ═══════════════════════════════════════════════════ -->
 <script>
+/* === drive_sync.js === */
+/**
+ * Google Drive Sync Module — KUFI ERP
+ * ─────────────────────────────────────────────────────────────────
+ * - OAuth 2.0 via Google Identity Services (token model)
+ * - Backup folder: "KUFI ERP Backups" (auto-created if missing)
+ * - Keeps last 3 versions: KUFI_ERP_backup_1.json (latest) … _3.json
+ * - Auto-backup every 5 minutes when signed in
+ * - Backup on logout
+ * - On login: compare Drive vs local timestamps, let user choose
+ * - beforeunload: warn if unsynced changes exist
+ */
+const DriveSync = (() => {
+  const CLIENT_ID   = '812483804186-j9klh0lmvsu701g2k3413lcegnn5n4lm.apps.googleusercontent.com';
+  const SCOPES      = 'https://www.googleapis.com/auth/drive.file';
+  const FOLDER_NAME = 'KUFI ERP Backups';
+  const FILE_PREFIX = 'KUFI_ERP_backup_';
+  const MAX_VERSIONS = 3;
+  const AUTO_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+  let _token        = null;   // current access token
+  let _folderId     = null;   // cached Drive folder ID
+  let _autoTimer    = null;   // setInterval handle
+  let _dirty        = false;  // unsaved changes flag
+  let _syncing      = false;  // prevent concurrent syncs
+  let _tokenClient  = null;   // GIS token client
+
+  // ── Status indicator ──────────────────────────────────────────
+  function _setStatus(msg, type) {
+    // type: 'ok' | 'warn' | 'err' | 'info'
+    var el = document.getElementById('drive-sync-status');
+    if (!el) return;
+    var icons = { ok: '☁✓', warn: '☁⚠', err: '☁✗', info: '☁…' };
+    var colors = { ok: 'var(--success)', warn: '#f59e0b', err: 'var(--danger)', info: 'var(--primary)' };
+    el.textContent = (icons[type] || '☁') + ' ' + msg;
+    el.style.color = colors[type] || 'var(--text-muted)';
+    el.style.display = 'inline-flex';
+  }
+
+  function _hideStatus() {
+    var el = document.getElementById('drive-sync-status');
+    if (el) el.style.display = 'none';
+  }
+
+  // ── GIS token handling ────────────────────────────────────────
+  function _ensureGIS() {
+    return new Promise((resolve, reject) => {
+      if (typeof google === 'undefined' || !google.accounts) {
+        reject(new Error('Google Identity Services not loaded'));
+        return;
+      }
+      if (_token) { resolve(_token); return; }
+
+      if (!_tokenClient) {
+        _tokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: CLIENT_ID,
+          scope: SCOPES,
+          callback: (resp) => {
+            if (resp.error) { reject(new Error(resp.error)); return; }
+            _token = resp.access_token;
+            // Token expires in ~1hr — clear it so next call re-auths
+            setTimeout(() => { _token = null; }, (resp.expires_in - 60) * 1000);
+            resolve(_token);
+          }
+        });
+      }
+      _tokenClient.requestAccessToken({ prompt: '' });
+    });
+  }
+
+  // ── Drive API helpers ─────────────────────────────────────────
+  async function _driveRequest(method, url, body, params) {
+    const token = await _ensureGIS();
+    const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+    const opts = {
+      method,
+      headers: { 'Authorization': 'Bearer ' + token }
+    };
+    if (body && typeof body === 'object' && !(body instanceof FormData)) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    } else if (body) {
+      opts.body = body;
+    }
+    const r = await fetch('https://www.googleapis.com/drive/v3' + url + qs, opts);
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error('Drive API ' + r.status + ': ' + txt.slice(0, 200));
+    }
+    return r.status === 204 ? null : r.json();
+  }
+
+  // ── Find or create backup folder ──────────────────────────────
+  async function _getOrCreateFolder() {
+    if (_folderId) return _folderId;
+    const res = await _driveRequest('GET', '/files', null, {
+      q: `name='${FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id,name)'
+    });
+    if (res.files && res.files.length > 0) {
+      _folderId = res.files[0].id;
+      return _folderId;
+    }
+    const folder = await _driveRequest('POST', '/files', {
+      name: FOLDER_NAME,
+      mimeType: 'application/vnd.google-apps.folder'
+    });
+    _folderId = folder.id;
+    return _folderId;
+  }
+
+  // ── List backup files in folder ───────────────────────────────
+  async function _listBackups() {
+    const fid = await _getOrCreateFolder();
+    const res = await _driveRequest('GET', '/files', null, {
+      q: `'${fid}' in parents and name contains '${FILE_PREFIX}' and trashed=false`,
+      fields: 'files(id,name,modifiedTime,size)',
+      orderBy: 'modifiedTime desc'
+    });
+    return res.files || [];
+  }
+
+  // ── Upload a new backup (rotate old ones) ─────────────────────
+  async function _uploadBackup(jsonStr) {
+    const fid = await _getOrCreateFolder();
+
+    // Get existing files sorted newest first
+    const existing = await _listBackups();
+
+    // Rotate: rename _2→_3, _1→_2, then upload as _1
+    // Simpler: delete oldest if ≥ MAX_VERSIONS, then upload _1 with timestamp
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename = FILE_PREFIX + ts + '.json';
+
+    // Upload new file
+    const meta = JSON.stringify({ name: filename, parents: [fid] });
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const form = new FormData();
+    form.append('metadata', new Blob([meta], { type: 'application/json' }));
+    form.append('file', blob);
+
+    const token = await _ensureGIS();
+    const r = await fetch(
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime',
+      { method: 'POST', headers: { 'Authorization': 'Bearer ' + token }, body: form }
+    );
+    if (!r.ok) throw new Error('Upload failed: ' + r.status);
+    const uploaded = await r.json();
+
+    // Delete oldest files beyond MAX_VERSIONS
+    if (existing.length >= MAX_VERSIONS) {
+      const toDelete = existing.slice(MAX_VERSIONS - 1);
+      for (const f of toDelete) {
+        try {
+          await _driveRequest('DELETE', '/files/' + f.id);
+        } catch(e) { /* ignore delete errors */ }
+      }
+    }
+    return uploaded;
+  }
+
+  // ── Download file by ID ───────────────────────────────────────
+  async function _downloadFile(fileId) {
+    const token = await _ensureGIS();
+    const r = await fetch(
+      'https://www.googleapis.com/drive/v3/files/' + fileId + '?alt=media',
+      { headers: { 'Authorization': 'Bearer ' + token } }
+    );
+    if (!r.ok) throw new Error('Download failed: ' + r.status);
+    return r.text();
+  }
+
+  // ── Mark data dirty (call whenever localStorage changes) ──────
+  function markDirty() { _dirty = true; }
+
+  // ── Full backup → Drive ───────────────────────────────────────
+  async function backup(silent) {
+    if (_syncing) return;
+    _syncing = true;
+    if (!silent) _setStatus('Saving…', 'info');
+    try {
+      const data = {};
+      const stores = ['activities','activityLogs','activityTasks','customers',
+                      'contacts','locations','stages','materials','crossref',
+                      'vendors','employees','assets','departments','company',
+                      'users','auditLog'];
+      stores.forEach(s => { data[s] = DB.getAll(s); });
+      data._meta = {
+        exportedAt: new Date().toISOString(),
+        exportedBy: Auth.currentUser()?.username || 'system',
+        version: '1.0'
+      };
+      const json = JSON.stringify(data, null, 2);
+      await _uploadBackup(json);
+      _dirty = false;
+      localStorage.setItem('erp_last_drive_sync', new Date().toISOString());
+      if (!silent) _setStatus('Synced ' + _fmtTime(new Date()), 'ok');
+      else         _setStatus('Auto-saved ' + _fmtTime(new Date()), 'ok');
+    } catch(e) {
+      console.error('Drive backup failed:', e);
+      if (!silent) _setStatus('Sync failed', 'err');
+      else         _setStatus('Auto-save failed', 'warn');
+    } finally {
+      _syncing = false;
+    }
+  }
+
+  // ── Restore from Drive file ───────────────────────────────────
+  async function _restoreFromJson(jsonStr) {
+    const data = JSON.parse(jsonStr);
+    const stores = Object.keys(data).filter(k => k !== '_meta');
+    stores.forEach(s => {
+      if (Array.isArray(data[s])) DB.setStore(s, data[s]);
+    });
+    localStorage.setItem('erp_last_drive_sync', new Date().toISOString());
+  }
+
+  // ── Login flow: compare Drive vs local, let user choose ───────
+  async function onLoginCheck() {
+    // Show connecting status on login page
+    _showLoginDriveStatus('Connecting to Google Drive…', 'info');
+    try {
+      const files = await _listBackups();
+      if (!files.length) {
+        _showLoginDriveStatus('No Drive backup found — using local data', 'warn');
+        return 'local';
+      }
+      const latest     = files[0];
+      const driveTime  = new Date(latest.modifiedTime);
+      const localSyncTs = localStorage.getItem('erp_last_drive_sync');
+      const localTime  = localSyncTs ? new Date(localSyncTs) : null;
+
+      return new Promise(resolve => {
+        _showDriveChoiceModal(driveTime, localTime, latest, resolve);
+      });
+    } catch(e) {
+      console.warn('Drive check on login failed:', e);
+      _showLoginDriveStatus('Drive unavailable — using local data', 'warn');
+      return 'local';
+    }
+  }
+
+  function _showLoginDriveStatus(msg, type) {
+    var el = document.getElementById('login-drive-status');
+    if (!el) return;
+    var colors = { info: 'var(--primary)', warn: '#f59e0b', err: 'var(--danger)', ok: 'var(--success)' };
+    el.textContent = '☁ ' + msg;
+    el.style.color  = colors[type] || 'var(--text-muted)';
+    el.style.display = 'block';
+  }
+
+  function _showDriveChoiceModal(driveTime, localTime, driveFile, resolve) {
+    const driveStr = _fmtDateTime(driveTime);
+    const localStr = localTime ? _fmtDateTime(localTime) : 'Unknown';
+    const driveNewer = !localTime || driveTime > localTime;
+
+    const html = `
+      <div style="padding:8px 0">
+        <p style="margin-bottom:16px;color:var(--text-muted);font-size:13px">
+          Choose which data to use for this session:
+        </p>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <button onclick="DriveSync._resolveChoice('drive')"
+            class="btn btn-primary" style="width:100%;text-align:left;padding:12px 16px">
+            <div style="font-weight:700">☁ Load from Google Drive ${driveNewer ? '<span style=\'background:#22c55e;color:#fff;border-radius:4px;padding:2px 6px;font-size:11px;margin-left:8px\'>NEWER</span>' : ''}</div>
+            <div style="font-size:12px;opacity:.8;margin-top:3px">Last saved: ${driveStr}</div>
+          </button>
+          <button onclick="DriveSync._resolveChoice('local')"
+            class="btn btn-ghost" style="width:100%;text-align:left;padding:12px 16px;border:1px solid var(--border)">
+            <div style="font-weight:700">💻 Continue with Local Data ${!driveNewer ? '<span style=\'background:#22c55e;color:#fff;border-radius:4px;padding:2px 6px;font-size:11px;margin-left:8px\'>NEWER</span>' : ''}</div>
+            <div style="font-size:12px;opacity:.8;margin-top:3px">Last sync: ${localStr}</div>
+          </button>
+        </div>
+        <p style="margin-top:12px;font-size:11px;color:var(--text-muted)">
+          ⓘ Drive file: ${driveFile.name}
+        </p>
+      </div>`;
+
+    Modal.open({
+      title: '☁ Google Drive Sync',
+      body: html,
+      hideFooter: true,
+      onClose: () => resolve('local')
+    });
+
+    // Store resolve for the buttons
+    DriveSync._pendingChoiceResolve = resolve;
+    DriveSync._pendingDriveFile = driveFile;
+  }
+
+  // Called by modal buttons
+  async function _resolveChoice(choice) {
+    Modal.close();
+    const resolve = DriveSync._pendingChoiceResolve;
+    const file    = DriveSync._pendingDriveFile;
+    if (choice === 'drive' && file) {
+      _showLoginDriveStatus('Loading from Drive…', 'info');
+      try {
+        const json = await _downloadFile(file.id);
+        await _restoreFromJson(json);
+        _showLoginDriveStatus('Loaded from Drive ✓', 'ok');
+        resolve('drive');
+      } catch(e) {
+        _showLoginDriveStatus('Failed to load from Drive — using local', 'err');
+        resolve('local');
+      }
+    } else {
+      resolve('local');
+    }
+  }
+
+  // ── Start auto-backup timer ───────────────────────────────────
+  function startAutoBackup() {
+    if (_autoTimer) clearInterval(_autoTimer);
+    _autoTimer = setInterval(() => {
+      if (_dirty && Auth.isLoggedIn()) backup(true);
+    }, AUTO_INTERVAL_MS);
+  }
+
+  function stopAutoBackup() {
+    if (_autoTimer) { clearInterval(_autoTimer); _autoTimer = null; }
+  }
+
+  // ── Backup on logout ──────────────────────────────────────────
+  async function onLogout() {
+    if (!_token) return; // not connected to Drive
+    stopAutoBackup();
+    _setStatus('Saving before logout…', 'info');
+    await backup(false);
+  }
+
+  // ── Beforeunload warning ──────────────────────────────────────
+  function setupUnloadWarning() {
+    window.addEventListener('beforeunload', e => {
+      if (_dirty && _token) {
+        e.preventDefault();
+        e.returnValue = 'You have unsynced changes. Please logout properly to save to Google Drive.';
+      }
+    });
+  }
+
+  // ── Connect / disconnect ──────────────────────────────────────
+  async function connect() {
+    try {
+      await _ensureGIS();
+      _setStatus('Connected', 'ok');
+      startAutoBackup();
+      return true;
+    } catch(e) {
+      _setStatus('Not connected', 'warn');
+      return false;
+    }
+  }
+
+  function isConnected() { return !!_token; }
+
+  function getLastSyncTime() {
+    const ts = localStorage.getItem('erp_last_drive_sync');
+    return ts ? new Date(ts) : null;
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────
+  function _fmtTime(d) {
+    return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+  }
+  function _fmtDateTime(d) {
+    return d.toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' })
+      + ' ' + d.toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit' });
+  }
+
+  return {
+    connect, isConnected, backup, onLoginCheck, onLogout,
+    startAutoBackup, stopAutoBackup, markDirty, getLastSyncTime,
+    setupUnloadWarning,
+    _resolveChoice  // exposed for modal buttons
+  };
+})();
+
+</script>
+<script>
 (function() {
   'use strict';
 
@@ -12071,7 +12460,19 @@ const BulkEditModule = (() => {
     const result = Auth.login(u, p);
     if (!result.ok) { err.textContent = result.msg; err.style.display='block'; return; }
     err.style.display='none';
-    showApp(result.user);
+    // Attempt Drive sync check before showing app
+    (async () => {
+      try {
+        const choice = await DriveSync.onLoginCheck();
+        // If user chose Drive, data was already restored — reload page to reflect
+        if (choice === 'drive') {
+          showApp(result.user);
+          setTimeout(() => location.reload(), 100);
+          return;
+        }
+      } catch(e) { /* Drive unavailable — proceed with local */ }
+      showApp(result.user);
+    })();
   };
 
   // Enter key for login
@@ -12083,7 +12484,11 @@ const BulkEditModule = (() => {
 
   // ── LOGOUT ────────────────────────────────────────
   window.doLogout = function() {
-    Auth.logout();
+    // Backup to Drive before logout
+    (async () => {
+      try { await DriveSync.onLogout(); } catch(e) {}
+      DriveSync.stopAutoBackup();
+      Auth.logout();
     // Signal the server to shut down, then close this tab
     fetch('/shutdown', { method: 'POST' }).catch(() => {});
     setTimeout(() => {
@@ -12094,6 +12499,8 @@ const BulkEditModule = (() => {
       document.getElementById('login-pwd').value = '';
       document.getElementById('login-user').value = '';
     }, 300);
+  
+    })();
   };
 
   // ── SHOW APP ──────────────────────────────────────
@@ -12131,6 +12538,13 @@ const BulkEditModule = (() => {
     // Check reminders
     checkReminders();
     setInterval(checkReminders, 60000); // every minute
+
+    // Start Drive auto-backup (only if already connected)
+    DriveSync.setupUnloadWarning();
+    if (DriveSync.isConnected()) {
+      DriveSync.startAutoBackup();
+      document.getElementById('drive-btn-label').textContent = 'Drive Connected';
+    }
   }
 
   // ── REMINDERS ─────────────────────────────────────
