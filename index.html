@@ -3050,7 +3050,7 @@ body.dark-mode .em-q-header { background: #1e293b; }
         <input class="form-input" id="login-pwd" type="password" placeholder="Enter password" autocomplete="current-password">
       </div>
       <div id="login-err" class="login-error" style="display:none"></div>
-      <div id="login-drive-status" style="display:none;text-align:center;font-size:12px;padding:8px;border-radius:6px;background:var(--bg);margin-top:8px"></div>
+      
           <button<button class="login-btn" onclick="doLogin()">Sign In</button>
     </div>
     <p style="text-align:center;font-size:11px;color:var(--text-muted);margin-top:20px;">
@@ -12282,7 +12282,7 @@ const DriveSync = (() => {
     // Use correct Modal.open(title, body, opts) signature
     Modal.open('☁ Google Drive Sync', body, {
       footer: '<button class="btn btn-ghost" onclick="DriveSync._pick(\'local\')">Use Local</button>',
-      size: 'sm'
+      size: 'md'
     });
 
     DriveSync._pendingResolve = resolve;
@@ -12414,19 +12414,7 @@ const DriveSync = (() => {
     const result = Auth.login(u, p);
     if (!result.ok) { err.textContent = result.msg; err.style.display='block'; return; }
     err.style.display='none';
-    // Attempt Drive sync check before showing app
-    (async () => {
-      try {
-        const choice = await DriveSync.onLoginCheck();
-        // If user chose Drive, data was already restored — reload page to reflect
-        if (choice === 'drive') {
-          showApp(result.user);
-          setTimeout(() => location.reload(), 100);
-          return;
-        }
-      } catch(e) { /* Drive unavailable — proceed with local */ }
-      showApp(result.user);
-    })();
+    showApp(result.user);
   };
 
   // Enter key for login
@@ -12497,7 +12485,9 @@ const DriveSync = (() => {
     DriveSync.setupUnloadWarning();
     if (DriveSync.isConnected()) {
       DriveSync.startAutoBackup();
-      document.getElementById('drive-btn-label').textContent = 'Drive Connected';
+      document.getElementById('drive-btn-label').textContent = 'Drive ✓';
+      // Check Drive for newer data - show modal inside app (non-blocking)
+      setTimeout(function() { DriveSync.onLoginCheck(); }, 500);
     }
   }
 
