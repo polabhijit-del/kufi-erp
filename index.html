@@ -3957,7 +3957,16 @@ const DashboardModule = (() => {
     function _outcome(a) { return a.outcomeStatus || (a.isActive === false ? 'lost' : 'active'); }
     const myActs = isAdmin
       ? activities.filter(function(a){ return _outcome(a) === 'active'; })
-      : activities.filter(function(a){ return _outcome(a) === 'active' && a.assignedUserId === user.id; });
+      : activities.filter(function(a){
+          if (_outcome(a) !== 'active') return false;
+          if (a.assignedUserId) return a.assignedUserId === user.id;
+          if (a.assignedTo) {
+            var at = (a.assignedTo || '').trim().toLowerCase();
+            return at === (user.username || '').toLowerCase()
+                || at === (user.name || '').toLowerCase();
+          }
+          return false;
+        });
 
     const myActIds = new Set(myActs.map(function(a){ return a.id; }));
     const allActivityTasks = DB.getAll('activityTasks');
@@ -6609,9 +6618,18 @@ const CustomerModule = (() => {
 
   async function deleteCustomer(id) {
     if (!Auth.isAdmin()) { Utils.toast('Only Admin can delete customers','error'); return; }
-    if (!await Utils.confirm('Permanently delete this customer?')) return;
+    if (!await Utils.confirm('Permanently delete this customer and all their contacts, locations and activities?')) return;
+    // Cascade: remove contacts
+    DB.query('customerContacts', function(c){ return c.customerId === id; })
+      .forEach(function(c){ DB.remove('customerContacts', c.id); });
+    // Cascade: remove locations
+    DB.query('customerLocations', function(l){ return l.customerId === id; })
+      .forEach(function(l){ DB.remove('customerLocations', l.id); });
+    // Cascade: soft-delete activities
+    DB.query('activities', function(a){ return a.customerId === id; })
+      .forEach(function(a){ DB.softDelete('activities', a.id); });
     DB.remove('customers', id);
-    Utils.toast('Customer deleted');
+    Utils.toast('Customer and all related data deleted');
     render();
   }
 
