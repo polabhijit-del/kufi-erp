@@ -9832,18 +9832,6 @@ const ReviewModule = (() => {
           + '</div></div>'
           + '<div id="review-stage-detail"></div>';
 
-    // Sales person & distributor breakdown
-    const employees2 = DB.getAll('employees').filter(function(e){ return e.isActive; });
-    const activeActs = allActivities.filter(function(a){ return a.isActive !== false; });
-    html += '<div class="card" style="margin-top:1.5rem">'
-          + '<div class="card-header" style="display:flex;align-items:center;justify-content:space-between">'
-          + '<h3>👥 Summary by Sales Person &amp; Distributor</h3>'
-          + '<span class="text-muted" style="font-size:12px">Click a sales person row to expand / collapse</span>'
-          + '</div>'
-          + '<div class="card-body" style="padding:0">'
-          + _buildSalesBreakdownHTML(activeActs, customers, employees2, stageMap, 'review')
-          + '</div></div>';
-
     // Key updates + Support
     var kuHidden = localStorage.getItem('review_ku_hidden') === '1';
     var openSupport = supportItems.filter(function(l){ return !l.closedAt; });
@@ -9859,6 +9847,18 @@ const ReviewModule = (() => {
     var suppLabel = '🔧 Support Required (' + openSupport.length + ' open'      + (closedCount > 0 ? ', ' + closedCount + ' closed' : '') + ')';
     html += '<div class="card-grid-2" style="margin-top:1.5rem">'          + '<div class="card">'          + '<div class="card-header" style="display:flex;align-items:center;justify-content:space-between">'          + '<h3>⭐ Key Updates (' + keyUpdates.length + ')</h3>'          + '<button class="btn btn-sm btn-ghost" onclick="_reviewToggleKU()">'          + (kuHidden ? '▼ Show' : '▲ Hide') + '</button>'          + '</div>'          + (kuHidden ? '' : '<div class="card-body p0">' + buildLogRows(keyUpdates) + '</div>')          + '</div>'          + '<div class="card">'          + '<div class="card-header"><h3>' + suppLabel + '</h3></div>'          + '<div class="card-body p0">' + buildSupportRows(openSupport) + '</div>'          + '</div>'          + '</div>';
 
+
+    // Sales person & distributor breakdown
+    const employees2 = DB.getAll('employees').filter(function(e){ return e.isActive; });
+    const activeActs = allActivities.filter(function(a){ return a.isActive !== false; });
+    html += '<div class="card" style="margin-top:1.5rem">'
+          + '<div class="card-header" style="display:flex;align-items:center;justify-content:space-between">'
+          + '<h3>👥 Summary by Sales Person &amp; Distributor</h3>'
+          + '<span class="text-muted" style="font-size:12px">Click a sales person row to expand / collapse</span>'
+          + '</div>'
+          + '<div class="card-body" style="padding:0">'
+          + _buildSalesBreakdownHTML(activeActs, customers, employees2, stageMap, 'review')
+          + '</div></div>';
 
     // ── Stage Conversion Funnel ──
     html += '<div class="card" style="margin-top:1.5rem">'
