@@ -7423,6 +7423,8 @@ const StagesModule = (() => {
 /* === js/modules/activities.js === */
 
 /* === js/modules/activities.js === */
+
+/* === js/modules/activities.js === */
 /* === js/modules/activities.js === */
 /**
  * Sales Activity Module — v3
@@ -7488,13 +7490,11 @@ const ActivityModule = (() => {
           && (t.status === 'pending' || t.status === 'completed');
     });
     if (anyExisting.length > 0) {
-      // If pending: update description. If completed: do nothing (task is done).
       var pending = anyExisting.filter(function(t){ return t.status === 'pending'; });
       if (pending.length > 0) {
         DB.update('activityTasks', pending[0].id, { description: desc });
+        return;
       }
-      // Completed task exists for this date — no new task needed
-      return;
     }
     DB.insert('activityTasks', {
       id: Utils.uid('TSK'), activityId: actId,
@@ -8367,8 +8367,13 @@ const ActivityModule = (() => {
           message: `📅 Reminder set for ${Utils.formatDate(d)} — ${note}`,
           followupDate: d, loggedBy: Auth.currentUser()?.username
         });
-        _upsertTask(actId, note, d);
-        Utils.toast('Reminder & task created 📅');
+        DB.insert('activityTasks', {
+          id: Utils.uid('TSK'), activityId: actId,
+          description: note, dueDate: d, status: 'pending',
+          createdBy: Auth.currentUser() ? Auth.currentUser().username : 'admin',
+          completedBy: null, completedAt: null
+        });
+        Utils.toast('Reminder & task created');
         Modal.close();
         viewDetail(actId);
       }
@@ -8719,6 +8724,7 @@ const ActivityModule = (() => {
     isActivityActive: _isActive
   };
 })();
+
 
 
 
