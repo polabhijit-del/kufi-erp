@@ -3297,8 +3297,27 @@ const Utils = (() => {
   function uid(prefix = 'ID') {
     const key = 'erp_counter_' + prefix;
     let n = parseInt(localStorage.getItem(key) || '0') + 1;
+    // Self-heal: if counter is behind existing records, catch up
+    // This fixes counter reset issues after re-installation
+    try {
+      const storeMap = { 'CUST':'customers', 'ACT':'activities', 'TSK':'activityTasks',
+                         'LOG':'activityLogs', 'EMP':'employees', 'AST':'assets',
+                         'MAT':'materials', 'VND':'vendors', 'STG':'stages', 'USR':'users' };
+      const storeName = storeMap[prefix];
+      if (storeName) {
+        const existing = JSON.parse(localStorage.getItem('erp_' + storeName) || '[]');
+        if (existing.length) {
+          const maxN = existing.reduce((mx, r) => {
+            if (!r.id || !r.id.startsWith(prefix + '-')) return mx;
+            const num = parseInt(r.id.replace(prefix + '-', ''), 10);
+            return isNaN(num) ? mx : Math.max(mx, num);
+          }, 0);
+          if (maxN >= n) n = maxN + 1;
+        }
+      }
+    } catch(e) { /* ignore */ }
     localStorage.setItem(key, n);
-    return `${prefix}-${String(n).padStart(6, '0')}`;
+    return prefix + '-' + String(n).padStart(6, '0');
   }
 
   function formatDate(iso) {
