@@ -9249,6 +9249,34 @@ const TaskModule = (() => {
         </div>
       </div>
 
+      <!-- Key Updates & Support -->
+      <div class="card-grid-2" style="margin-top:1.5rem">
+        <div class="card">
+          <div class="card-header"><h3>⭐ Recent Key Updates</h3></div>
+          <div class="card-body p0">
+            ${keyUpdates.length ? keyUpdates.map(l => {
+              const act = DB.getById('activities', l.activityId);
+              return `<div class="log-row">
+                <div class="lr-msg">${Utils.escapeHtml(l.message)}</div>
+                <div class="lr-meta">${Utils.escapeHtml(act?.title||l.activityId)} • ${Utils.escapeHtml(l.loggedBy)} • ${Utils.formatDate(l.createdAt)}</div>
+              </div>`;
+            }).join('') : '<div class="empty-log" style="padding:1rem">No key updates yet</div>'}
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>🔧 Support Required</h3></div>
+          <div class="card-body p0">
+            ${supportItems.length ? supportItems.map(l => {
+              const act = DB.getById('activities', l.activityId);
+              return `<div class="log-row">
+                <div class="lr-msg">${Utils.escapeHtml(l.message)}</div>
+                <div class="lr-meta">${Utils.escapeHtml(act?.title||l.activityId)} • ${Utils.escapeHtml(l.loggedBy)} • ${Utils.formatDate(l.createdAt)}</div>
+              </div>`;
+            }).join('') : '<div class="empty-log" style="padding:1rem">No support requests</div>'}
+          </div>
+        </div>
+      </div>
+
       <!-- Stage detail panel — populated by TaskModule.showStageDetail() -->
       <div id="task-stage-detail"></div>
 
@@ -9281,34 +9309,6 @@ const TaskModule = (() => {
           </div>
         </div>
       ` : ''}
-
-      <!-- Key Updates & Support -->
-      <div class="card-grid-2" style="margin-top:1.5rem">
-        <div class="card">
-          <div class="card-header"><h3>⭐ Recent Key Updates</h3></div>
-          <div class="card-body p0">
-            ${keyUpdates.length ? keyUpdates.map(l => {
-              const act = DB.getById('activities', l.activityId);
-              return `<div class="log-row">
-                <div class="lr-msg">${Utils.escapeHtml(l.message)}</div>
-                <div class="lr-meta">${Utils.escapeHtml(act?.title||l.activityId)} • ${Utils.escapeHtml(l.loggedBy)} • ${Utils.formatDate(l.createdAt)}</div>
-              </div>`;
-            }).join('') : '<div class="empty-log" style="padding:1rem">No key updates yet</div>'}
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-header"><h3>🔧 Support Required</h3></div>
-          <div class="card-body p0">
-            ${supportItems.length ? supportItems.map(l => {
-              const act = DB.getById('activities', l.activityId);
-              return `<div class="log-row">
-                <div class="lr-msg">${Utils.escapeHtml(l.message)}</div>
-                <div class="lr-meta">${Utils.escapeHtml(act?.title||l.activityId)} • ${Utils.escapeHtml(l.loggedBy)} • ${Utils.formatDate(l.createdAt)}</div>
-              </div>`;
-            }).join('') : '<div class="empty-log" style="padding:1rem">No support requests</div>'}
-          </div>
-        </div>
-      </div>
 
       <!-- Lost / Declined / Closed Outcome Summary -->
       ${(() => {
