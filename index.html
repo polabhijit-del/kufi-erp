@@ -2337,6 +2337,11 @@ code { font-family: 'IBM Plex Mono', 'Courier New', monospace; font-size: 0.9em;
   background: var(--danger-light);
   color: var(--danger);
 }
+.cal-chip-done {
+  background: #dcfce7;
+  color: #16a34a;
+  opacity: 0.85;
+}
 .cal-chip-overdue:hover { background: var(--danger); color: #fff; }
 
 /* Legend */
@@ -4078,7 +4083,7 @@ const DashboardModule = (() => {
       + '<div id="dash-tab-content">'
       + (_tab === 'today'
           ? _renderTodayTab(todayTasks, overdue, stageMap, stageCounts, custMap, locMap, stages, recentActs, isAdmin, myActs, allActivityTasks, todayStr)
-          : _renderCalendarTab(myActs, custMap, stageMap))
+          : _renderCalendarTab(myActs, custMap, stageMap, allActivityTasks))
       + '</div>'
 
       + '</div>'; // .dashboard
@@ -4430,7 +4435,7 @@ const DashboardModule = (() => {
   /* ═══════════════════════════════════════════════════════════════════
      CALENDAR TAB
   ═══════════════════════════════════════════════════════════════════ */
-  function _renderCalendarTab(myActs, custMap, stageMap) {
+  function _renderCalendarTab(myActs, custMap, stageMap, allActivityTasks) {
     var now   = new Date();
     var year  = _year;
     var month = _month; // 0-indexed
@@ -4444,17 +4449,42 @@ const DashboardModule = (() => {
 
     /* Build day index: "YYYY-MM-DD" → [activity, …] */
     var actsOnDay = {};
+    /* Scheduled follow-ups */
     myActs.forEach(function(a) {
       if (!a.nextFollowup) return;
       var key = a.nextFollowup.slice(0, 10);
       var parts = key.split('-');
       var ay = parseInt(parts[0], 10);
-      var am = parseInt(parts[1], 10) - 1; // 0-indexed
+      var am = parseInt(parts[1], 10) - 1;
       if (ay === year && am === month) {
         if (!actsOnDay[key]) actsOnDay[key] = [];
-        actsOnDay[key].push(a);
+        if (!actsOnDay[key].find(function(x){ return x.id === a.id; }))
+          actsOnDay[key].push(a);
       }
     });
+    /* Completed tasks — show on their dueDate in calendar */
+    var myActIds = new Set(myActs.map(function(a){ return a.id; }));
+    if (allActivityTasks) {
+      allActivityTasks.forEach(function(t) {
+        if (t.status !== 'completed') return;
+        if (!myActIds.has(t.activityId)) return;
+        var key = (t.dueDate || '').slice(0, 10);
+        if (!key) return;
+        var parts = key.split('-');
+        var ay = parseInt(parts[0], 10);
+        var am = parseInt(parts[1], 10) - 1;
+        if (ay !== year || am !== month) return;
+        var act = myActs.find(function(a){ return a.id === t.activityId; });
+        if (!act) return;
+        if (!actsOnDay[key]) actsOnDay[key] = [];
+        /* Only add if not already there from nextFollowup */
+        if (!actsOnDay[key].find(function(x){ return x.id === act.id; })) {
+          /* Mark as completed for visual distinction */
+          var actCopy = Object.assign({}, act, { _calCompleted: true });
+          actsOnDay[key].push(actCopy);
+        }
+      });
+    }
 
     /* Calendar geometry */
     var daysInMonth  = new Date(year, month + 1, 0).getDate();
@@ -4490,9 +4520,11 @@ const DashboardModule = (() => {
         var custDisplay = loc ? custName + ' — ' + loc.name : custName;
         var stage    = stageMap[a.stageId];
         var stageTip = stage ? stage.name : '';
-        return '<div class="cal-chip' + (isPast ? ' cal-chip-overdue' : '') + '"'
+        var chipExtra = a._calCompleted ? ' cal-chip-done' : (isPast ? ' cal-chip-overdue' : '');
+        return '<div class="cal-chip' + chipExtra + '"'
           + ' onclick="ActivityModule.viewDetail(\'' + a.id + '\')"'
-          + ' title="' + Utils.escapeHtml(a.title) + (stageTip ? ' — ' + Utils.escapeHtml(stageTip) : '') + '">'
+          + ' title="' + Utils.escapeHtml(a.title) + (stageTip ? ' — ' + Utils.escapeHtml(stageTip) : '') + (a._calCompleted ? ' (done)' : '') + '">'
+          + (a._calCompleted ? '<span style="opacity:.7">✓</span> ' : '')
           + Utils.escapeHtml(custDisplay)
           + '</div>';
       }).join('');
