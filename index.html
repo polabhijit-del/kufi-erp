@@ -9844,6 +9844,22 @@ const ReviewModule = (() => {
           + _buildSalesBreakdownHTML(activeActs, customers, employees2, stageMap, 'review')
           + '</div></div>';
 
+    // Key updates + Support
+    var kuHidden = localStorage.getItem('review_ku_hidden') === '1';
+    var openSupport = supportItems.filter(function(l){ return !l.closedAt; });
+    var buildSupportRows = function(items) {
+      if (!items.length) return '<div class="empty-log" style="padding:1rem">No open support requests</div>';
+      return items.map(function(l) {
+        var act  = allActivities.find(function(a){ return a.id === l.activityId; });
+        var cust = act && act.customerId && custMap[act.customerId] ? custMap[act.customerId].name : '—';
+        return '<div class="log-row" style="display:flex;align-items:flex-start;gap:8px">'             + '<div style="flex:1">'             + '<div class="lr-msg">'  + Utils.escapeHtml(l.message) + '</div>'             + '<div class="lr-meta">' + Utils.escapeHtml(act ? act.title : '—')             + ' • ' + Utils.escapeHtml(cust)             + ' • ' + Utils.escapeHtml(l.loggedBy || '—')             + ' • ' + Utils.formatDate(l.createdAt) + '</div>'             + '</div>'             + '<button onclick="ReviewModule.closeSupport(\'' + l.id + '\')" '             + 'class="btn btn-sm" style="flex-shrink:0;padding:2px 8px;font-size:11px">Close ×</button>'             + '</div>';
+      }).join('');
+    };
+    var closedCount = supportItems.length - openSupport.length;
+    var suppLabel = '🔧 Support Required (' + openSupport.length + ' open'      + (closedCount > 0 ? ', ' + closedCount + ' closed' : '') + ')';
+    html += '<div class="card-grid-2" style="margin-top:1.5rem">'          + '<div class="card">'          + '<div class="card-header" style="display:flex;align-items:center;justify-content:space-between">'          + '<h3>⭐ Key Updates (' + keyUpdates.length + ')</h3>'          + '<button class="btn btn-sm btn-ghost" onclick="ReviewModule.toggleKeyUpdates()">'          + (kuHidden ? '▼ Show' : '▲ Hide') + '</button>'          + '</div>'          + (kuHidden ? '' : '<div class="card-body p0">' + buildLogRows(keyUpdates) + '</div>')          + '</div>'          + '<div class="card">'          + '<div class="card-header"><h3>' + suppLabel + '</h3></div>'          + '<div class="card-body p0">' + buildSupportRows(openSupport) + '</div>'          + '</div>'          + '</div>';
+
+
     // ── Stage Conversion Funnel ──
     html += '<div class="card" style="margin-top:1.5rem">'
           + '<div class="card-header" style="display:flex;align-items:center;justify-content:space-between">'
@@ -9904,14 +9920,6 @@ const ReviewModule = (() => {
             + '</div>';
     }
     html += '</div></div>';
-
-    // Key updates + Support
-    html += '<div class="card-grid-2" style="margin-top:1.5rem">'
-          + '<div class="card"><div class="card-header"><h3>⭐ Key Updates (' + keyUpdates.length + ')</h3></div>'
-          + '<div class="card-body p0">' + buildLogRows(keyUpdates) + '</div></div>'
-          + '<div class="card"><div class="card-header"><h3>🔧 Support Required (' + supportItems.length + ')</h3></div>'
-          + '<div class="card-body p0">' + buildLogRows(supportItems) + '</div></div>'
-          + '</div>';
 
     // All activities
     html += '<div class="card" style="margin-top:1.5rem">'
@@ -10064,6 +10072,26 @@ const ReviewModule = (() => {
     if (window._lastReviewPrompt) _renderAIInsights('review-ai-panel', window._lastReviewPrompt);
   };
 
+  window.ReviewModule = ReviewModule; // ensure global access for inline buttons
+
+  function toggleKeyUpdates() {
+    var hidden = localStorage.getItem('review_ku_hidden') === '1';
+    localStorage.setItem('review_ku_hidden', hidden ? '0' : '1');
+    ReviewModule.refresh();
+  }
+
+  function closeSupport(logId) {
+    var logs = DB.getAll('activityLogs');
+    var idx  = logs.findIndex(function(l){ return l.id === logId; });
+    if (idx > -1) {
+      logs[idx].closedAt = new Date().toISOString();
+      logs[idx].closedBy = Auth.currentUser() ? Auth.currentUser().username : 'admin';
+      DB.setStore('activityLogs', logs);
+      Utils.toast('Support item closed');
+      ReviewModule.refresh();
+    }
+  }
+
   function setPeriod(type) {
     const d = new Date();
     if (type === 'week') {
@@ -10202,7 +10230,7 @@ const ReviewModule = (() => {
     panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
-  return { render, setPeriod, setCustomPeriod, refresh, showStageDetail };
+  return { render, setPeriod, setCustomPeriod, refresh, showStageDetail, toggleKeyUpdates, closeSupport };
 
 })();
 
