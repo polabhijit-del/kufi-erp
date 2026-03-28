@@ -5795,7 +5795,16 @@ const CrossRefModule = (function() {
       '<div class="card"><div class="card-body p0">' +
         Utils.buildTable(
           [{label:'Our Part',width:'120px'},{label:'Manufacturer',width:'110px'},{label:'Mfg Part No.',width:'125px'},{label:'Description'},{label:'µm',width:'50px'},{label:'Ht"',width:'50px'},{label:'Fitting',width:'75px'},{label:'Media/Mem.',width:'90px'},{label:'Mfg Price',width:'80px'},{label:'Equiv.',width:'75px'},{label:'Pri',width:'38px'},{label:'Qualification',width:'110px'},{label:'OEM',width:'80px'},{label:'Actions',width:'75px'}],
-          filtered.map(function(x){
+          filtered.slice().sort(function(a, b) {
+            var pA = (matMap[a.ourPartId] ? matMap[a.ourPartId].partNumber : '').toLowerCase();
+            var pB = (matMap[b.ourPartId] ? matMap[b.ourPartId].partNumber : '').toLowerCase();
+            if (pA < pB) return -1;
+            if (pA > pB) return 1;
+            // Same part: sort by manufacturer name
+            var mA = (a.manufacturerName || a.competitor || '').toLowerCase();
+            var mB = (b.manufacturerName || b.competitor || '').toLowerCase();
+            return mA < mB ? -1 : mA > mB ? 1 : 0;
+          }).map(function(x){
             var mat = matMap[x.ourPartId];
             return '<td class="font-mono fw-bold">'+(mat?'<span style="cursor:pointer;color:var(--primary)" onclick="MaterialModule.view(\''+mat.id+'\')">'+Utils.escapeHtml(mat.partNumber)+'</span>':'<span class="text-muted">TBD</span>')+'</td>' +
               '<td class="fw-semibold">'+Utils.escapeHtml(x.manufacturerName||x.competitor||'—')+'</td>' +
