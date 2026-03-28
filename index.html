@@ -1060,6 +1060,7 @@ textarea.form-input { resize: vertical; min-height: 72px; }
 
 /* ── FONT UTILITIES ─────────────────────────────────── */
 .font-mono { font-family: 'IBM Plex Mono', 'Courier New', monospace; }
+.data-table td.font-mono { white-space: nowrap; }
 code { font-family: 'IBM Plex Mono', 'Courier New', monospace; font-size: 0.9em; }
 .text-muted { color: var(--text-muted); }
 .text-danger { color: var(--danger); font-weight: 600; }
@@ -5460,9 +5461,9 @@ const MaterialModule = (function() {
       '</div>' +
       '<div class="card"><div class="card-body p0">' +
         Utils.buildTable(
-          [{label:'Part No.',width:'130px'},{label:'Type',width:'95px'},{label:'Description'},{label:'µm',width:'55px'},{label:'Ht"',width:'55px'},{label:'Fitting',width:'85px'},{label:'Media',width:'85px'},{label:'Seal',width:'75px'},{label:'List Price',width:'90px'},{label:'Segments'},{label:'Status',width:'75px'},{label:'Actions',width:'110px'}],
+          [{label:'Part No.',width:'165px'},{label:'Type',width:'95px'},{label:'Description'},{label:'µm',width:'55px'},{label:'Ht"',width:'55px'},{label:'Fitting',width:'85px'},{label:'Media',width:'85px'},{label:'Seal',width:'75px'},{label:'List Price',width:'90px'},{label:'Segments'},{label:'Status',width:'75px'},{label:'Actions',width:'110px'}],
           pg.items.map(function(m) {
-            return '<td class="font-mono fw-bold" style="cursor:pointer;color:var(--primary)" onclick="MaterialModule.view(\''+m.id+'\')">'+Utils.escapeHtml(m.partNumber)+'</td>' +
+            return '<td class="font-mono fw-bold" style="cursor:pointer;color:var(--primary);white-space:nowrap" onclick="MaterialModule.view(\''+m.id+'\')">'+Utils.escapeHtml(m.partNumber)+'</td>' +
               '<td>'+(m.categoryType ? Utils.badge(m.categoryType,'blue') : '<span class="text-muted">—</span>')+'</td>' +
               '<td><div class="cell-primary">'+Utils.escapeHtml(m.description)+'</div><div class="cell-sub">'+(m.applications||[]).slice(0,2).map(function(a){return Utils.badge(a,'gray');}).join(' ')+'</div></td>' +
               '<td class="text-center">'+(m.micron ? '<span class="badge badge-purple">'+Utils.escapeHtml(String(m.micron))+'µ</span>' : '<span class="text-muted">—</span>')+'</td>' +
