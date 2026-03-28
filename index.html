@@ -3307,7 +3307,8 @@ const Utils = (() => {
     try {
       const storeMap = { 'CUST':'customers', 'ACT':'activities', 'TSK':'activityTasks',
                          'LOG':'activityLogs', 'EMP':'employees', 'AST':'assets',
-                         'MAT':'materials', 'VND':'vendors', 'STG':'stages', 'USR':'users' };
+                         'MAT':'materials', 'VND':'vendors', 'STG':'stages', 'USR':'users',
+                         'XRF':'crossRef', 'CCT':'customerContacts', 'LOC':'customerLocations' };
       const storeName = storeMap[prefix];
       if (storeName) {
         const existing = JSON.parse(localStorage.getItem('erp_' + storeName) || '[]');
