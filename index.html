@@ -3221,7 +3221,7 @@ body.dark-mode .em-q-header { background: #1e293b; }
       </button>
       <div id="drive-sync-status" onclick="DriveSync.backup(false)" title="Click to sync now"
         style="display:none;align-items:center;gap:4px;font-size:12px;color:var(--text-muted);white-space:nowrap;cursor:pointer;padding:4px 8px;border-radius:6px;border:1px solid var(--border)"></div>
-      <button id="drive-connect-btn" onclick="DriveSync.connect()" title="Connect Google Drive"
+      <button id="drive-connect-btn" onclick="DriveDB.connect().then(function(ok){ if(ok){ var lbl=document.getElementById('drive-btn-label'); if(lbl) lbl.textContent='Drive ✓ Live'; } })" title="Connect Google Drive (Live Sync)"
         style="display:flex;align-items:center;gap:5px;padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);cursor:pointer;font-size:12px;color:var(--text-muted)">
         ☁ <span id="drive-btn-label">Drive</span>
       </button>
@@ -3476,7 +3476,12 @@ const DB = (() => {
   function setStore(name, data) {
     try {
       localStorage.setItem(PREFIX + name, JSON.stringify(data));
-      if (typeof DriveSync !== 'undefined') DriveSync.markDirty();
+      // Notify DriveDB to push to Drive (Drive-first architecture)
+      if (typeof DriveDB !== 'undefined' && DriveDB.isConnected()) {
+        DriveDB.notifyWrite(name);
+      } else if (typeof DriveSync !== 'undefined') {
+        DriveSync.markDirty(); // fallback to old sync
+      }
     } catch(e) {
       if (e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014)) {
         /* localStorage full — trim audit log to free space then retry */
@@ -12178,6 +12183,583 @@ const BulkEditModule = (() => {
 <!--  APPLICATION BOOTSTRAP                             -->
 <!-- ═══════════════════════════════════════════════════ -->
 <script>
+/* === drive_db.js === */
+/* === DriveDB — Google Drive as primary storage, localStorage as cache === */
+/**
+ * Architecture:
+ * - All data lives in KUFI ERP Data Backup/ folder on Drive
+ * - One JSON file per store: kufi_customers.json, kufi_activities.json etc
+ * - kufi_meta.json = version index { storeName: { version, updatedBy, updatedAt } }
+ * - localStorage = write-through cache (can be cleared anytime, auto-recovers)
+ * - Conflict detection: every write checks Drive version before saving
+ * - Polling: every 60s checks meta.json for changes by other users
+ */
+const DriveDB = (() => {
+  const CLIENT_ID   = '812483804186-j9klh0lmvsu701g2k3413lcegnn5n4lm.apps.googleusercontent.com';
+  const SCOPES      = 'https://www.googleapis.com/auth/drive.file';
+  const FOLDER_NAME = 'KUFI ERP Data Backup';
+  const POLL_MS     = 60 * 1000; // 60 seconds
+  const LS_PREFIX   = 'erp_';
+  const LS_VER_KEY  = 'erp_drivedb_versions'; // local version cache
+  const LS_TOKEN_KEY= 'erp_drive_token_hint'; // not the actual token - just a flag
+
+  // Stores that are Drive-managed
+  const DRIVE_STORES = [
+    'activities','activityLogs','activityTasks',
+    'customers','customerContacts','customerLocations','customerRequests',
+    'materials','crossRef','vendors',
+    'employees','assets',
+    'stages','departments','company',
+    'users','segments','leadSources','states','regions',
+    'specCategories','applications'
+  ];
+
+  // Reference stores - cached longer, less frequent writes
+  const REF_STORES = new Set([
+    'stages','departments','states','regions',
+    'segments','leadSources','specCategories','applications'
+  ]);
+
+  let _token       = null;
+  let _tokenClient = null;
+  let _folderId    = null;
+  let _fileIds     = {};   // filename -> Drive file id
+  const LS_FILEIDS_KEY = 'erp_drivedb_fileids';
+  const LS_FOLDERID_KEY = 'erp_drivedb_folderid';
+
+  // Load cached file IDs from localStorage on init
+  (function() {
+    try {
+      var cached = JSON.parse(localStorage.getItem(LS_FILEIDS_KEY) || '{}');
+      _fileIds = cached;
+      var cachedFolder = localStorage.getItem(LS_FOLDERID_KEY);
+      if (cachedFolder) _folderId = cachedFolder;
+    } catch(e) {}
+  })();
+  let _driveVers   = {};   // storeName -> { version, updatedBy, updatedAt }
+  let _localVers   = {};   // storeName -> version number we loaded
+  let _metaFileId  = null;
+  let _pollTimer   = null;
+  let _writeQueue  = {};   // storeName -> pending write timer
+  let _connected   = false;
+  let _initialised = false;
+  let _onChangeCallback = null; // called when Drive has newer data
+
+  // ── Status ──────────────────────────────────────────────────
+  function _setStatus(msg, type) {
+    var el = document.getElementById('drive-sync-status');
+    if (!el) return;
+    var icons  = { ok:'☁ ✓', warn:'☁ ⚠', err:'☁ ✗', info:'☁ …', sync:'☁ ↑' };
+    var colors = { ok:'var(--success)', warn:'#f59e0b', err:'var(--danger)', info:'var(--primary)', sync:'var(--primary)' };
+    el.textContent = (icons[type]||'☁') + ' ' + msg;
+    el.style.color = colors[type]||'var(--text-muted)';
+    el.style.display = 'inline-flex';
+  }
+
+  // ── GIS Token ───────────────────────────────────────────────
+  function _ensureToken() {
+    return new Promise(function(resolve, reject) {
+      if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) {
+        reject(new Error('Google Identity Services not loaded')); return;
+      }
+      if (_token) { resolve(_token); return; }
+      if (!_tokenClient) {
+        _tokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: CLIENT_ID,
+          scope: SCOPES,
+          callback: function(resp) {
+            if (resp.error) { reject(new Error(resp.error)); return; }
+            _token = resp.access_token;
+            _connected = true;
+            setTimeout(function() { _token = null; _connected = false; }, (resp.expires_in - 60) * 1000);
+            resolve(_token);
+          }
+        });
+      }
+      _tokenClient.requestAccessToken({ prompt: '' });
+    });
+  }
+
+  // ── Drive REST ───────────────────────────────────────────────
+  async function _req(method, path, body, params, isUpload) {
+    var token = await _ensureToken();
+    var base  = isUpload ? 'https://www.googleapis.com/upload/drive/v3' : 'https://www.googleapis.com/drive/v3';
+    var qs    = params ? '?' + new URLSearchParams(params).toString() : '';
+    var opts  = { method: method, headers: { 'Authorization': 'Bearer ' + token } };
+    if (body && !(body instanceof FormData)) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    } else if (body) { opts.body = body; }
+    var r = await fetch(base + path + qs, opts);
+    if (!r.ok) { var t = await r.text(); throw new Error('Drive ' + r.status + ': ' + t.slice(0,300)); }
+    return r.status === 204 ? null : r.json();
+  }
+
+  // ── Folder ───────────────────────────────────────────────────
+  async function _getFolder() {
+    if (_folderId) return _folderId;
+    var res = await _req('GET', '/files', null, {
+      q: "name='" + FOLDER_NAME + "' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+      fields: 'files(id,name)'
+    });
+    if (res.files && res.files.length) { _folderId = res.files[0].id; return _folderId; }
+    // Create folder
+    var f = await _req('POST', '/files', { name: FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder' });
+    _folderId = f.id;
+    try { localStorage.setItem(LS_FOLDERID_KEY, _folderId); } catch(e) {}
+    return _folderId;
+  }
+
+  // ── Find or create a file in the folder ─────────────────────
+  async function _getFileId(filename) {
+    if (_fileIds[filename]) return _fileIds[filename];
+    var fid = await _getFolder();
+    var res = await _req('GET', '/files', null, {
+      q: "name='" + filename + "' and '" + fid + "' in parents and trashed=false",
+      fields: 'files(id,name)'
+    });
+    if (res.files && res.files.length) {
+      _fileIds[filename] = res.files[0].id;
+      try { localStorage.setItem(LS_FILEIDS_KEY, JSON.stringify(_fileIds)); } catch(e) {}
+      return _fileIds[filename];
+    }
+    return null; // does not exist yet
+  }
+
+  // ── Read a file from Drive ───────────────────────────────────
+  async function _readFile(filename) {
+    var fileId = await _getFileId(filename);
+    if (!fileId) return null;
+    var token = await _ensureToken();
+    var r = await fetch('https://www.googleapis.com/drive/v3/files/' + fileId + '?alt=media', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    if (!r.ok) throw new Error('Drive read ' + r.status);
+    return r.json();
+  }
+
+  // ── Write a file to Drive (create or update) ─────────────────
+  async function _writeFile(filename, obj) {
+    var fid    = await _getFolder();
+    var fileId = await _getFileId(filename);
+    var body   = JSON.stringify(obj);
+    var meta   = JSON.stringify(fileId ? {} : { name: filename, parents: [fid] });
+    var form   = new FormData();
+    form.append('metadata', new Blob([meta], { type: 'application/json' }));
+    form.append('file',     new Blob([body],  { type: 'application/json' }));
+    var token  = await _ensureToken();
+    var url    = fileId
+      ? 'https://www.googleapis.com/upload/drive/v3/files/' + fileId + '?uploadType=multipart'
+      : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
+    var r = await fetch(url, {
+      method: fileId ? 'PATCH' : 'POST',
+      headers: { 'Authorization': 'Bearer ' + token },
+      body: form
+    });
+    if (!r.ok) { var t = await r.text(); throw new Error('Drive write ' + r.status + ': ' + t.slice(0,200)); }
+    var result = await r.json();
+    _fileIds[filename] = result.id;
+    try { localStorage.setItem(LS_FILEIDS_KEY, JSON.stringify(_fileIds)); } catch(e) {}
+    return result.id;
+  }
+
+  // ── Meta file operations ─────────────────────────────────────
+  async function _readMeta() {
+    try {
+      var meta = await _readFile('kufi_meta.json');
+      if (meta) { _driveVers = meta.versions || {}; return _driveVers; }
+    } catch(e) {}
+    return {};
+  }
+
+  async function _writeMeta() {
+    await _writeFile('kufi_meta.json', { versions: _driveVers, updatedAt: new Date().toISOString() });
+  }
+
+  // ── Load a store from Drive into localStorage ─────────────────
+  async function _loadStore(storeName) {
+    try {
+      var filename = 'kufi_' + storeName + '.json';
+      var file = await _readFile(filename);
+      if (!file) return; // doesn't exist yet on Drive
+      var data = file.data || [];
+      var ver  = file.version || 0;
+      // Write to localStorage cache
+      localStorage.setItem(LS_PREFIX + storeName, JSON.stringify(data));
+      _localVers[storeName] = ver;
+      _saveLocalVersions();
+    } catch(e) {
+      console.warn('DriveDB: failed to load', storeName, e);
+    }
+  }
+
+  // ── Save a store from localStorage to Drive ──────────────────
+  async function _saveStore(storeName, force) {
+    try {
+      var data = JSON.parse(localStorage.getItem(LS_PREFIX + storeName) || '[]');
+      var driveVer = _driveVers[storeName] ? _driveVers[storeName].version : 0;
+      var localVer = _localVers[storeName] || 0;
+
+      // Conflict check: if Drive version advanced beyond what we loaded
+      if (!force && driveVer > localVer) {
+        // Someone else wrote since we loaded — conflict!
+        var driveInfo = _driveVers[storeName] || {};
+        return {
+          conflict: true,
+          storeName: storeName,
+          driveVersion: driveVer,
+          driveUpdatedBy: driveInfo.updatedBy || 'another user',
+          driveUpdatedAt: driveInfo.updatedAt || ''
+        };
+      }
+
+      var newVer = (driveVer || 0) + 1;
+      var user   = (typeof Auth !== 'undefined' && Auth.currentUser()) ? Auth.currentUser().username : 'system';
+      var now    = new Date().toISOString();
+
+      await _writeFile('kufi_' + storeName + '.json', {
+        store:     storeName,
+        version:   newVer,
+        updatedBy: user,
+        updatedAt: now,
+        data:      data
+      });
+
+      // Update meta
+      _driveVers[storeName] = { version: newVer, updatedBy: user, updatedAt: now };
+      _localVers[storeName] = newVer;
+      _saveLocalVersions();
+      await _writeMeta();
+
+      return { conflict: false, version: newVer };
+    } catch(e) {
+      console.error('DriveDB: failed to save', storeName, e);
+      return { conflict: false, error: e.message };
+    }
+  }
+
+  // ── Version persistence in localStorage ─────────────────────
+  function _saveLocalVersions() {
+    try { localStorage.setItem(LS_VER_KEY, JSON.stringify(_localVers)); } catch(e) {}
+  }
+  function _loadLocalVersions() {
+    try { _localVers = JSON.parse(localStorage.getItem(LS_VER_KEY) || '{}'); } catch(e) { _localVers = {}; }
+  }
+
+  // ── Queue a write (debounced 3 seconds) ──────────────────────
+  function _queueWrite(storeName) {
+    if (!_connected) return;
+    if (_writeQueue[storeName]) clearTimeout(_writeQueue[storeName]);
+    _writeQueue[storeName] = setTimeout(async function() {
+      delete _writeQueue[storeName];
+      _setStatus('Saving…', 'sync');
+      var result = await _saveStore(storeName, false);
+      if (result && result.conflict) {
+        _showConflict(result);
+      } else {
+        var t = new Date(); 
+        var ts = t.getHours() + ':' + String(t.getMinutes()).padStart(2,'0');
+        _setStatus('Saved ' + ts, 'ok');
+      }
+    }, 3000);
+  }
+
+  // ── Conflict dialog ──────────────────────────────────────────
+  function _showConflict(info) {
+    _setStatus('Conflict!', 'warn');
+    var msg = 'Data conflict on "' + info.storeName + '".\n\n'
+      + info.driveUpdatedBy + ' saved changes at ' + new Date(info.driveUpdatedAt).toLocaleTimeString() + '.\n\n'
+      + 'Options:\n'
+      + '• "Reload" — discard your changes, load latest from Drive\n'
+      + '• "Force Save" — overwrite Drive with your version\n\n'
+      + 'Recommend: Reload unless your change is more recent.';
+    
+    if (typeof Modal !== 'undefined') {
+      Modal.open('⚠ Data Conflict', 
+        '<p style="color:var(--danger)"><strong>Another user modified this data.</strong></p>'
+        + '<p><strong>' + info.driveUpdatedBy + '</strong> saved changes at <strong>' 
+        + new Date(info.driveUpdatedAt).toLocaleTimeString() + '</strong></p>'
+        + '<p>Your unsaved changes to <em>' + info.storeName + '</em> may be lost if you reload.</p>', {
+        footer: '<button class="btn btn-danger" onclick="DriveDB._forceWrite(\'' + info.storeName + '\');Modal.close()">Force Save Mine</button>'
+               + '<button class="btn btn-primary" onclick="DriveDB._reloadStore(\'' + info.storeName + '\');Modal.close()">Reload from Drive</button>',
+        size: 'sm'
+      });
+    }
+  }
+
+  // ── Public: force write (override conflict) ──────────────────
+  async function _forceWrite(storeName) {
+    _setStatus('Force saving…', 'sync');
+    // First reload Drive meta to get current version, then save with force=true
+    await _readMeta();
+    var result = await _saveStore(storeName, true);
+    _setStatus('Force saved', 'ok');
+  }
+
+  // ── Public: reload store from Drive ─────────────────────────
+  async function _reloadStore(storeName) {
+    _setStatus('Reloading…', 'info');
+    await _readMeta();
+    await _loadStore(storeName);
+    _setStatus('Reloaded', 'ok');
+    // Re-render current page
+    if (typeof Router !== 'undefined') Router.refresh && Router.refresh();
+  }
+
+  // ── Poll for changes ─────────────────────────────────────────
+  async function _poll() {
+    if (!_connected) return;
+    try {
+      var meta = await _readMeta();
+      var changes = [];
+      Object.keys(meta).forEach(function(storeName) {
+        var dv = meta[storeName] ? meta[storeName].version : 0;
+        var lv = _localVers[storeName] || 0;
+        if (dv > lv) changes.push({ storeName: storeName, info: meta[storeName] });
+      });
+      if (changes.length > 0) {
+        // Silently reload reference stores
+        // For live data stores, show notification
+        var liveChanges = changes.filter(function(c) { return !REF_STORES.has(c.storeName); });
+        var refChanges  = changes.filter(function(c) { return REF_STORES.has(c.storeName); });
+        
+        // Always silently update reference stores
+        for (var i = 0; i < refChanges.length; i++) {
+          await _loadStore(refChanges[i].storeName);
+        }
+        
+        if (liveChanges.length > 0) {
+          var storeList = liveChanges.map(function(c) { return c.storeName; }).join(', ');
+          var updater   = liveChanges[0].info.updatedBy || 'another user';
+          _setStatus('Updated by ' + updater, 'warn');
+          // Show banner
+          _showUpdateBanner(liveChanges);
+        }
+      }
+    } catch(e) {
+      // Poll failures are silent - don't disrupt user
+      console.warn('DriveDB poll error:', e.message);
+    }
+  }
+
+  function _showUpdateBanner(changes) {
+    var existing = document.getElementById('drivedb-update-banner');
+    if (existing) existing.remove();
+    var storeList = changes.map(function(c) { return c.storeName; }).join(', ');
+    var updater   = changes[0].info.updatedBy || 'another user';
+    var time      = new Date(changes[0].info.updatedAt).toLocaleTimeString();
+    var banner    = document.createElement('div');
+    banner.id     = 'drivedb-update-banner';
+    banner.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);'
+      + 'background:var(--warning-light,#fffbeb);border:1px solid #f59e0b;border-radius:8px;'
+      + 'padding:10px 16px;z-index:9999;display:flex;align-items:center;gap:12px;'
+      + 'box-shadow:0 2px 8px rgba(0,0,0,.15);font-size:13px;max-width:500px';
+    banner.innerHTML = '<span>⚠ <strong>' + updater + '</strong> updated data at ' + time + '.</span>'
+      + '<button onclick="DriveDB.reloadAll();this.closest(\'#drivedb-update-banner\').remove()" '
+      + 'style="padding:4px 10px;background:var(--primary);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">Reload</button>'
+      + '<button onclick="this.closest(\'#drivedb-update-banner\').remove()" '
+      + 'style="padding:4px 8px;background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:16px">×</button>';
+    document.body.appendChild(banner);
+    setTimeout(function() { if (banner.parentNode) banner.remove(); }, 30000);
+  }
+
+  // ── Public: connect to Drive ─────────────────────────────────
+  async function connect() {
+    try {
+      _setStatus('Connecting…', 'info');
+      await _ensureToken();
+      _connected = true;
+      localStorage.setItem(LS_TOKEN_KEY, '1');
+      _setStatus('Connected', 'ok');
+      return true;
+    } catch(e) {
+      _setStatus('Connect failed', 'err');
+      return false;
+    }
+  }
+
+  // ── Public: initial load after login ────────────────────────
+  async function initialLoad(onProgress) {
+    if (_initialised) return true;
+    try {
+      _loadLocalVersions();
+      _setStatus('Loading data…', 'info');
+      
+      // Read meta to know what's on Drive
+      await _readMeta();
+      
+      // Determine what needs loading:
+      // Cold start: everything (localStorage empty)
+      // Warm start: only stores where Drive version > local version
+      var toLoad   = [];
+      var toPush   = []; // stores with local data but nothing on Drive yet
+      DRIVE_STORES.forEach(function(s) {
+        var driveVer = _driveVers[s] ? _driveVers[s].version : 0;
+        var localVer = _localVers[s]  || 0;
+        var hasLocal = !!localStorage.getItem(LS_PREFIX + s);
+        if (driveVer === 0 && hasLocal) {
+          toPush.push(s); // Drive empty, local has data → push to Drive
+        } else if (!hasLocal || driveVer > localVer) {
+          toLoad.push(s); // Drive newer → load from Drive
+        }
+      });
+
+      // First-time migration: push local data to Drive
+      if (toPush.length > 0) {
+        if (onProgress) onProgress(0, toPush.length, 'Uploading to Drive…');
+        // Push in parallel batches of 4 to avoid rate limits
+        var pushBatchSize = 4;
+        for (var pi = 0; pi < toPush.length; pi += pushBatchSize) {
+          var pushBatch = toPush.slice(pi, pi + pushBatchSize);
+          await Promise.all(pushBatch.map(function(s) {
+            return _saveStore(s, true);
+          }));
+          if (onProgress) onProgress(Math.min(pi + pushBatchSize, toPush.length), toPush.length, 'Uploading…');
+        }
+      }
+
+      if (toLoad.length === 0 && toPush.length === 0) {
+        _setStatus('Up to date', 'ok');
+        _initialised = true;
+        _startPolling();
+        return true;
+      }
+
+      // Load in parallel batches for speed
+      // Batch 1: critical data needed to render app
+      var batch1 = ['users','company','stages','employees','customers','departments'];
+      // Batch 2: main CRM data
+      var batch2 = ['activities','activityTasks','activityLogs',
+                    'customerContacts','customerLocations','crossRef','materials','vendors'];
+      // Batch 3: reference / config data
+      var batch3 = ['segments','leadSources','states','regions',
+                    'specCategories','applications','assets','customerRequests'];
+
+      function inLoad(s) { return toLoad.indexOf(s) > -1; }
+
+      var b1 = batch1.filter(inLoad);
+      var b2 = batch2.filter(inLoad);
+      var b3 = batch3.filter(inLoad);
+      var total = b1.length + b2.length + b3.length;
+      var done  = 0;
+
+      if (onProgress) onProgress(0, total, 'Connecting…');
+
+      // Batch 1: parallel
+      await Promise.all(b1.map(function(s) {
+        return _loadStore(s).then(function() {
+          done++;
+          if (onProgress) onProgress(done, total, s);
+        });
+      }));
+
+      // Batch 2: parallel
+      await Promise.all(b2.map(function(s) {
+        return _loadStore(s).then(function() {
+          done++;
+          if (onProgress) onProgress(done, total, s);
+        });
+      }));
+
+      // Batch 3: parallel
+      await Promise.all(b3.map(function(s) {
+        return _loadStore(s).then(function() {
+          done++;
+          if (onProgress) onProgress(done, total, s);
+        });
+      }));
+
+      _setStatus('Ready', 'ok');
+      _initialised = true;
+      _startPolling();
+      return true;
+    } catch(e) {
+      console.error('DriveDB initialLoad error:', e);
+      _setStatus('Load failed', 'err');
+      return false;
+    }
+  }
+
+  // ── Public: reload all live stores ──────────────────────────
+  async function reloadAll() {
+    _setStatus('Reloading…', 'info');
+    await _readMeta();
+    for (var i = 0; i < DRIVE_STORES.length; i++) {
+      await _loadStore(DRIVE_STORES[i]);
+    }
+    _setStatus('Reloaded', 'ok');
+    if (typeof Router !== 'undefined' && Router.refresh) Router.refresh();
+  }
+
+  // ── Public: notify a store was written (called by DB.setStore) 
+  function notifyWrite(storeName) {
+    if (DRIVE_STORES.indexOf(storeName) > -1) {
+      _queueWrite(storeName);
+    }
+  }
+
+  // ── Public: flush all pending writes immediately ─────────────
+  async function flushAll() {
+    var pending = Object.keys(_writeQueue);
+    pending.forEach(function(s) {
+      clearTimeout(_writeQueue[s]);
+      delete _writeQueue[s];
+    });
+    _setStatus('Saving…', 'sync');
+    var storesToSave = pending.length > 0 ? pending : [];
+    // Also save any dirty stores
+    for (var i = 0; i < storesToSave.length; i++) {
+      await _saveStore(storesToSave[i], false);
+    }
+    _setStatus('Saved', 'ok');
+  }
+
+  // ── Polling control ──────────────────────────────────────────
+  function _startPolling() {
+    if (_pollTimer) clearInterval(_pollTimer);
+    _pollTimer = setInterval(_poll, POLL_MS);
+  }
+
+  function stopPolling() {
+    if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+  }
+
+  // ── Clear localStorage on logout ─────────────────────────────
+  function clearLocalCache() {
+    // Flush pending writes first
+    Object.keys(_writeQueue).forEach(function(s) { clearTimeout(_writeQueue[s]); });
+    _writeQueue = {};
+    
+    // Clear all erp_ keys EXCEPT users and drive token hint
+    var keep = ['erp_users', 'erp_stages', LS_VER_KEY, LS_TOKEN_KEY];
+    var keys = [];
+    for (var i = 0; i < localStorage.length; i++) {
+      var k = localStorage.key(i);
+      if (k && k.startsWith('erp_') && keep.indexOf(k) === -1) keys.push(k);
+    }
+    keys.forEach(function(k) { localStorage.removeItem(k); });
+    
+    // Reset state but keep file ID cache (safe to keep, speeds up reconnect)
+    _token = null; _connected = false; _initialised = false;
+    _localVers = {}; _driveVers = {};
+    stopPolling();
+  }
+
+  function isConnected() { return _connected; }
+  function wasConnected() { return localStorage.getItem(LS_TOKEN_KEY) === '1'; }
+
+  return {
+    connect, initialLoad, reloadAll, notifyWrite, flushAll,
+    clearLocalCache, isConnected, wasConnected,
+    stopPolling,
+    _forceWrite, _reloadStore,  // exposed for inline onclick
+    DRIVE_STORES
+  };
+})();
+
+</script>
+
+<script>
 /* === drive_sync.js === */
 /**
  * Google Drive Sync Module — KUFI ERP v2
@@ -12583,7 +13165,33 @@ const DriveSync = (() => {
     const result = Auth.login(u, p);
     if (!result.ok) { err.textContent = result.msg; err.style.display='block'; return; }
     err.style.display='none';
-    showApp(result.user);
+    // Drive-first: connect and load data before showing app
+    (async function() {
+      var btn = document.getElementById('login-btn');
+      if (btn) { btn.disabled = true; btn.textContent = 'Connecting…'; }
+      try {
+        // If Drive was previously connected, reconnect silently
+        if (DriveDB.wasConnected() || true) {
+          var connected = await DriveDB.connect();
+          if (connected) {
+            // Show loading progress
+            var err2 = document.getElementById('login-err');
+            if (err2) {
+              err2.style.display = 'block';
+              err2.style.color = 'var(--primary)';
+              err2.textContent = '☁ Loading data from Drive…';
+            }
+            await DriveDB.initialLoad(function(done, total, storeName) {
+              if (err2) err2.textContent = '☁ Loading ' + storeName + ' (' + done + '/' + total + ')…';
+            });
+          }
+        }
+      } catch(e) {
+        console.warn('Drive connect failed, proceeding with local data:', e);
+      }
+      if (btn) { btn.disabled = false; btn.textContent = 'Sign In'; }
+      showApp(result.user);
+    })();
   };
 
   // Enter key for login
@@ -12595,22 +13203,32 @@ const DriveSync = (() => {
 
   // ── LOGOUT ────────────────────────────────────────
   window.doLogout = function() {
-    // Backup to Drive before logout
     (async () => {
-      try { await DriveSync.onLogout(); } catch(e) {}
-      DriveSync.stopAutoBackup();
+      // Show saving indicator
+      Utils.toast('Saving data before logout…', 'info', 3000);
+      try {
+        // Flush all pending Drive writes first
+        if (typeof DriveDB !== 'undefined' && DriveDB.isConnected()) {
+          await DriveDB.flushAll();
+        }
+        // Legacy drive sync fallback
+        try { await DriveSync.onLogout(); } catch(e) {}
+        DriveSync.stopAutoBackup();
+      } catch(e) { console.warn('Logout flush error:', e); }
+      
       Auth.logout();
-    // Signal the server to shut down, then close this tab
-    fetch('/shutdown', { method: 'POST' }).catch(() => {});
-    setTimeout(() => {
-      try { window.close(); } catch(e) {}
-      // Fallback: show login page if tab didn't close
+      
+      // Clear localStorage cache (Drive is source of truth)
+      if (typeof DriveDB !== 'undefined') {
+        DriveDB.clearLocalCache();
+      }
+      
+      // Show login page
       document.getElementById('app').style.display = 'none';
       document.getElementById('login-page').style.display = 'flex';
       document.getElementById('login-pwd').value = '';
       document.getElementById('login-user').value = '';
-    }, 300);
-  
+      document.getElementById('login-err').style.display = 'none';
     })();
   };
 
@@ -12870,6 +13488,20 @@ const DriveSync = (() => {
   if (DB.trimAudit) DB.trimAudit();
   Auth.init();
   registerRoutes();
+
+  // Flush pending Drive writes on tab close
+  window.addEventListener('beforeunload', function(e) {
+    if (typeof DriveDB !== 'undefined' && DriveDB.isConnected()) {
+      DriveDB.flushAll();
+    }
+  });
+
+  // On page visibility hidden (tab switch / minimize) - flush writes
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden && typeof DriveDB !== 'undefined' && DriveDB.isConnected()) {
+      DriveDB.flushAll();
+    }
+  });
 
   if (Auth.isLoggedIn()) {
     showApp(Auth.currentUser());
