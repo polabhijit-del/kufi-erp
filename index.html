@@ -10361,6 +10361,43 @@ const BackupModule = (function() {
     reader.onload = function(e) {
       try {
         var data = JSON.parse(e.target.result);
+        // Normalise Drive backup format (flat keys) to restore format ({ stores: {} })
+        if (data._meta && !data.stores) {
+          var keyMap = {
+            'activities':   'activities',
+            'activityLogs': 'activityLogs',
+            'activityTasks':'activityTasks',
+            'customers':    'customers',
+            'contacts':     'customerContacts',
+            'locations':    'customerLocations',
+            'stages':       'stages',
+            'materials':    'materials',
+            'crossref':     'crossRef',
+            'vendors':      'vendors',
+            'employees':    'employees',
+            'assets':       'assets',
+            'departments':  'departments',
+            'company':      'company',
+            'users':        'users',
+            'segments':     'segments',
+            'leadSources':  'leadSources',
+            'states':       'states',
+            'regions':      'regions'
+          };
+          var stores = {};
+          Object.keys(data).forEach(function(k) {
+            if (k === '_meta' || k === 'auditLog') return;
+            var mapped = keyMap[k] || k;
+            stores[mapped] = data[k];
+          });
+          data = {
+            _meta: {
+              createdAt: data._meta.exportedAt || data._meta.createdAt || new Date().toISOString(),
+              createdBy: data._meta.exportedBy || data._meta.createdBy || 'Drive Backup'
+            },
+            stores: stores
+          };
+        }
         if (!data._meta || !data.stores) {
           Utils.toast('Invalid backup file — missing required fields', 'error'); return;
         }
