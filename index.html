@@ -10364,25 +10364,31 @@ const BackupModule = (function() {
         // Normalise Drive backup format (flat keys) to restore format ({ stores: {} })
         if (data._meta && !data.stores) {
           var keyMap = {
-            'activities':   'activities',
-            'activityLogs': 'activityLogs',
-            'activityTasks':'activityTasks',
-            'customers':    'customers',
-            'contacts':     'customerContacts',
-            'locations':    'customerLocations',
-            'stages':       'stages',
-            'materials':    'materials',
-            'crossref':     'crossRef',
-            'vendors':      'vendors',
-            'employees':    'employees',
-            'assets':       'assets',
-            'departments':  'departments',
-            'company':      'company',
-            'users':        'users',
-            'segments':     'segments',
-            'leadSources':  'leadSources',
-            'states':       'states',
-            'regions':      'regions'
+            'activities':        'activities',
+            'activityLogs':      'activityLogs',
+            'activityTasks':     'activityTasks',
+            'customers':         'customers',
+            'contacts':          'customerContacts',
+            'customerContacts':  'customerContacts',
+            'locations':         'customerLocations',
+            'customerLocations': 'customerLocations',
+            'customerRequests':  'customerRequests',
+            'stages':            'stages',
+            'materials':         'materials',
+            'crossref':          'crossRef',
+            'crossRef':          'crossRef',
+            'vendors':           'vendors',
+            'employees':         'employees',
+            'assets':            'assets',
+            'departments':       'departments',
+            'company':           'company',
+            'users':             'users',
+            'segments':          'segments',
+            'leadSources':       'leadSources',
+            'states':            'states',
+            'regions':           'regions',
+            'specCategories':    'specCategories',
+            'applications':      'applications'
           };
           var stores = {};
           Object.keys(data).forEach(function(k) {
@@ -10443,6 +10449,10 @@ const BackupModule = (function() {
         console.warn('Could not restore store:', name, e);
       }
     });
+    // Restore custom combobox values if present
+    if (stores['erp_mc_custom_lists']) {
+      try { localStorage.setItem('erp_mc_custom_lists', JSON.stringify(stores['erp_mc_custom_lists'])); } catch(e) {}
+    }
 
     DB.addAudit({ action:'RESTORE', store:'system', recordId:'restore',
       newVal:{ file: _pendingRestore._meta.createdAt, stores: Object.keys(stores).length } });
@@ -12313,12 +12323,37 @@ const DriveSync = (() => {
 
   // ── Collect all data ──────────────────────────────────────────
   function _collectData() {
-    var stores = ['activities','activityLogs','activityTasks','customers',
-                  'contacts','locations','stages','materials','crossref',
-                  'vendors','employees','assets','departments','company',
-                  'users','auditLog'];
+    var storeMap = {
+      'activities':         'activities',
+      'activityLogs':       'activityLogs',
+      'activityTasks':      'activityTasks',
+      'customers':          'customers',
+      'customerContacts':   'customerContacts',
+      'customerLocations':  'customerLocations',
+      'customerRequests':   'customerRequests',
+      'stages':             'stages',
+      'materials':          'materials',
+      'crossRef':           'crossRef',
+      'vendors':            'vendors',
+      'employees':          'employees',
+      'assets':             'assets',
+      'departments':        'departments',
+      'company':            'company',
+      'users':              'users',
+      'segments':           'segments',
+      'leadSources':        'leadSources',
+      'states':             'states',
+      'regions':            'regions',
+      'specCategories':     'specCategories',
+      'applications':       'applications'
+    };
     var data = {};
-    stores.forEach(function(s) { data[s] = DB.getAll(s); });
+    Object.keys(storeMap).forEach(function(s) { data[s] = DB.getAll(storeMap[s]); });
+    // Also capture custom combobox values (raw key, not erp_ prefixed)
+    try {
+      var mcRaw = localStorage.getItem('erp_mc_custom_lists');
+      if (mcRaw) data['erp_mc_custom_lists'] = JSON.parse(mcRaw);
+    } catch(e) {}
     data._meta = { exportedAt: new Date().toISOString(),
                    exportedBy: (Auth.currentUser() || {}).username || 'system' };
     return JSON.stringify(data, null, 2);
