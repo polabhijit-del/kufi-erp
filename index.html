@@ -4443,6 +4443,7 @@ const DashboardModule = (() => {
   ═══════════════════════════════════════════════════════════════════ */
   function _renderCalendarTab(myActs, custMap, stageMap, allActivityTasks) {
     var now   = new Date();
+    var locMap = Object.fromEntries(DB.getAll('customerLocations').map(function(l){ return [l.id, l]; }));
     var year  = _year;
     var month = _month; // 0-indexed
 
