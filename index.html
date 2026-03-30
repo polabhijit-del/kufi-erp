@@ -3730,7 +3730,9 @@ const Router = (() => {
     }
     currentRoute = name;
     _doRender(name, params);
+    _settingHash = true;
     window.location.hash = name;
+    setTimeout(function(){ _settingHash = false; }, 50);
     document.querySelectorAll('.nav-item').forEach(function(el) {
       el.classList.toggle('active',
         el.dataset.route === name ||
@@ -3777,8 +3779,10 @@ const Router = (() => {
     }
   }
 
-  /* hashchange — handles browser back/forward */
+  var _settingHash = false;
+  /* hashchange — handles browser back/forward only, not our own navigate() calls */
   window.addEventListener('hashchange', function() {
+    if (_settingHash) return;
     var h = window.location.hash.replace('#', '') || 'dashboard';
     if (typeof Auth !== 'undefined' && Auth.isLoggedIn()) navigate(h);
   });
