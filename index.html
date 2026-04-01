@@ -168,6 +168,7 @@ body {
 #sidebar[data-nav="activities"] .nav-item[data-route="activities"],
 #sidebar[data-nav="tasks"] .nav-item[data-route="tasks"],
 #sidebar[data-nav="review"] .nav-item[data-route="review"],
+#sidebar[data-nav="filterpotential"] .nav-item[data-route="filterpotential"],
 #sidebar[data-nav="users"] .nav-item[data-route="users"],
 #sidebar[data-nav="audit"] .nav-item[data-route="audit"],
 #sidebar[data-nav="backup"] .nav-item[data-route="backup"],
@@ -3152,6 +3153,11 @@ body.dark-mode .em-q-header { background: #1e293b; }
         <span>Review Meeting</span>
       </div>
 
+      <div class="nav-item" data-route="filterpotential" onclick="Router.navigate('filterpotential'); setNavActive('filterpotential'); closeMobileNav()">
+        <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 3c1.93 0 3.5 1.57 3.5 3.5S13.93 13 12 13s-3.5-1.57-3.5-3.5S10.07 6 12 6zm7 13H5v-.23c0-.62.28-1.2.76-1.58C7.47 15.82 9.64 15 12 15s4.53.82 6.24 2.19c.48.38.76.97.76 1.58V19z"/></svg>
+        <span>Filter Potential</span>
+      </div>
+
       <div class="nav-section-label" id="admin-nav-label">Admin</div>
 
       <div class="nav-item" data-route="users" id="nav-users" onclick="Router.navigate('users'); setNavActive('users'); closeMobileNav()">
@@ -3309,7 +3315,7 @@ const Utils = (() => {
       const storeMap = { 'CUST':'customers', 'ACT':'activities', 'TSK':'activityTasks',
                          'LOG':'activityLogs', 'EMP':'employees', 'AST':'assets',
                          'MAT':'materials', 'VND':'vendors', 'STG':'stages', 'USR':'users',
-                         'XRF':'crossRef', 'CCT':'customerContacts', 'LOC':'customerLocations' };
+                         'XRF':'crossRef', 'CCT':'customerContacts', 'LOC':'customerLocations', 'FLR':'filterRequirements' };
       const storeName = storeMap[prefix];
       if (storeName) {
         const existing = JSON.parse(localStorage.getItem('erp_' + storeName) || '[]');
@@ -6443,6 +6449,7 @@ const CustomerModule = (() => {
         <button class="tab-btn" onclick="CustomerModule.switchTab(this,'tab-contacts')">Contacts (${contacts.length})</button>
         <button class="tab-btn" onclick="CustomerModule.switchTab(this,'tab-locations')">Locations (${locations.length})</button>
         <button class="tab-btn" onclick="CustomerModule.switchTab(this,'tab-activities')">Activities (${activities.length})</button>
+        <button class="tab-btn" onclick="CustomerModule.switchTab(this,'tab-filterpot')">Filter Potential</button>
       </div>
 
       <div id="tab-info" class="tab-content active">
@@ -6530,7 +6537,11 @@ const CustomerModule = (() => {
           `)
         )}
       </div>
-    `;
+
+      <div id="tab-filterpot" class="tab-content" style="display:none">
+        ${FilterPotentialModule ? FilterPotentialModule.renderCustomerTab('${c.id}') : '<p>Loading…</p>'}
+      </div>
+    \`;
   }
 
   function switchTab(btn, tabId) {
@@ -12183,6 +12194,535 @@ const BulkEditModule = (() => {
 <!--  APPLICATION BOOTSTRAP                             -->
 <!-- ═══════════════════════════════════════════════════ -->
 <script>
+/* === js/modules/filterPotential.js === */
+/* === js/modules/filterPotential.js === */
+/**
+ * Filter Requirements & Potential Module
+ * - Record filter installations per customer/location
+ * - Calculate annual qty & value potential
+ * - Forecast demand for 3/6/12 months
+ * - Alert on sites due for change within 30 days (statistical)
+ */
+const FilterPotentialModule = (() => {
+
+  // ── helpers ──────────────────────────────────────────────────
+  function _annualQty(r) {
+    if (!r.housings || !r.filtersPerHousing || !r.intervalDays) return 0;
+    return r.housings * r.filtersPerHousing * (365 / r.intervalDays);
+  }
+
+  function _annualValue(r, matMap) {
+    var qty = _annualQty(r);
+    if (!qty) return 0;
+    var partId = r.ourPartId || r.partId;
+    if (!partId) return 0;
+    var mat = matMap[partId];
+    if (!mat || !mat.listPrice) return 0;
+    return qty * parseFloat(mat.listPrice);
+  }
+
+  function _resolveOurPart(req) {
+    // If competitorPartId set, resolve via crossRef
+    if (req.competitorPartId && !req.ourPartId) {
+      var xref = DB.getById('crossRef', req.competitorPartId);
+      if (xref && xref.ourPartId) return xref.ourPartId;
+    }
+    return req.ourPartId || req.partId || null;
+  }
+
+  function _partLabel(partId, matMap, xrefs) {
+    if (!partId) return '—';
+    var mat = matMap[partId];
+    if (mat) return mat.partNumber;
+    return partId;
+  }
+
+  function _locationLabel(locId, locMap) {
+    if (!locId) return 'Head Office / Main Site';
+    var loc = locMap[locId];
+    return loc ? loc.name : 'Head Office / Main Site';
+  }
+
+  // ── main render ──────────────────────────────────────────────
+  function render() {
+    var content = document.getElementById('main-content');
+    var reqs    = DB.getAll('filterRequirements').filter(function(r){ return r.isActive !== false; });
+    var customers = DB.getAll('customers');
+    var custMap   = Object.fromEntries(customers.map(function(c){ return [c.id, c]; }));
+    var mats      = DB.getAll('materials');
+    var matMap    = Object.fromEntries(mats.map(function(m){ return [m.id, m]; }));
+    var locs      = DB.getAll('customerLocations');
+    var locMap    = Object.fromEntries(locs.map(function(l){ return [l.id, l]; }));
+    var xrefs     = DB.getAll('crossRef');
+
+    // Resolve ourPartId for all reqs
+    reqs.forEach(function(r) {
+      if (!r.ourPartId && r.competitorPartId) {
+        r._resolvedPartId = _resolveOurPart(r);
+      } else {
+        r._resolvedPartId = r.ourPartId || r.partId || null;
+      }
+    });
+
+    // ── Summary stats ──
+    var totalAnnualQty   = reqs.reduce(function(s,r){ return s + _annualQty(r); }, 0);
+    var totalAnnualValue = reqs.reduce(function(s,r){ return s + _annualValue(r, matMap); }, 0);
+    var custCount        = new Set(reqs.map(function(r){ return r.customerId; })).size;
+    var partCount        = new Set(reqs.map(function(r){ return r._resolvedPartId; }).filter(Boolean)).size;
+
+    // ── Forecast: monthly demand by part ──
+    var forecastMap = {}; // partId -> { qty, value, label }
+    reqs.forEach(function(r) {
+      var pid = r._resolvedPartId;
+      if (!pid) return;
+      var qty = _annualQty(r) / 12; // monthly
+      var val = _annualValue(r, matMap) / 12;
+      if (!forecastMap[pid]) {
+        forecastMap[pid] = { qty: 0, value: 0, label: _partLabel(pid, matMap, xrefs) };
+      }
+      forecastMap[pid].qty   += qty;
+      forecastMap[pid].value += val;
+    });
+    var forecastRows = Object.entries(forecastMap).sort(function(a,b){
+      return b[1].value - a[1].value;
+    });
+
+    // ── 30-day alert: sites statistically due ──
+    // A site is "due soon" if interval <= 30 days (change very frequently)
+    // OR if annual_qty > 12 (more than monthly) → highlight
+    var alertReqs = reqs.filter(function(r){
+      return r.intervalDays && r.intervalDays <= 45;
+    });
+
+    // ── Customer-wise potential ──
+    var custPotMap = {};
+    reqs.forEach(function(r) {
+      var cid = r.customerId;
+      if (!custPotMap[cid]) custPotMap[cid] = { qty: 0, value: 0, count: 0 };
+      custPotMap[cid].qty   += _annualQty(r);
+      custPotMap[cid].value += _annualValue(r, matMap);
+      custPotMap[cid].count++;
+    });
+    var custRows = Object.entries(custPotMap)
+      .sort(function(a,b){ return b[1].value - a[1].value; })
+      .slice(0, 20);
+
+    var html = '<div class="page-header">'
+      + '<div><h1 class="page-title">Filter Potential</h1>'
+      + '<p class="page-subtitle">Filter requirements, potential & demand forecast</p></div>'
+      + '<div class="page-actions">'
+      + (Auth.isAdmin() || Auth.isSales()
+          ? '<button class="btn btn-primary" onclick="FilterPotentialModule.openForm()">'
+            + '<svg viewBox="0 0 24 24" style="width:16px;height:16px;fill:currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>'
+            + ' Add Requirement</button>'
+          : '')
+      + '</div></div>';
+
+    // Stats row
+    html += '<div class="stats-row" style="margin-bottom:1.5rem">'
+      + '<div class="stat-card"><div class="stat-value">' + custCount + '</div><div class="stat-label">Customers</div></div>'
+      + '<div class="stat-card"><div class="stat-value">' + reqs.length + '</div><div class="stat-label">Installations</div></div>'
+      + '<div class="stat-card stat-success"><div class="stat-value">' + Math.round(totalAnnualQty).toLocaleString() + '</div><div class="stat-label">Annual Qty (units)</div></div>'
+      + '<div class="stat-card stat-warning"><div class="stat-value">₹' + (totalAnnualValue/100000).toFixed(1) + 'L</div><div class="stat-label">Annual Value</div></div>'
+      + '</div>';
+
+    // Alert box
+    if (alertReqs.length > 0) {
+      html += '<div class="card" style="margin-bottom:1.5rem;border-left:4px solid var(--warning)">'
+        + '<div class="card-header"><h3>⚠ Frequent Change — High Priority Sites (' + alertReqs.length + ')</h3></div>'
+        + '<div class="card-body p0"><table class="data-table" style="width:100%">'
+        + '<thead><tr><th>Customer</th><th>Location</th><th>Part</th><th>Interval</th><th>Annual Qty</th><th>Actions</th></tr></thead><tbody>'
+        + alertReqs.map(function(r) {
+            var cust = custMap[r.customerId];
+            return '<tr>'
+              + '<td>' + Utils.escapeHtml(cust ? cust.name : '—') + '</td>'
+              + '<td>' + Utils.escapeHtml(_locationLabel(r.locationId, locMap)) + '</td>'
+              + '<td class="font-mono">' + Utils.escapeHtml(_partLabel(r._resolvedPartId, matMap, xrefs)) + '</td>'
+              + '<td>' + r.intervalDays + ' days</td>'
+              + '<td>' + Math.round(_annualQty(r)) + '</td>'
+              + '<td>' + Utils.actionBtns(r.id, { viewFn:'', editFn:'FilterPotentialModule.openForm', deleteFn:'FilterPotentialModule.deleteReq', view:false }) + '</td>'
+              + '</tr>';
+          }).join('')
+        + '</tbody></table></div></div>';
+    }
+
+    // Two-column: forecast + customer potential
+    html += '<div class="card-grid-2" style="margin-bottom:1.5rem">';
+
+    // Forecast card
+    html += '<div class="card">'
+      + '<div class="card-header" style="display:flex;align-items:center;justify-content:space-between">'
+      + '<h3>📊 Demand Forecast by Part</h3>'
+      + '<div style="display:flex;gap:6px">'
+      + '<span class="badge badge-blue" style="cursor:pointer" onclick="FilterPotentialModule._setForecastPeriod(3)" id="fp-3">3M</span>'
+      + '<span class="badge badge-gray" style="cursor:pointer" onclick="FilterPotentialModule._setForecastPeriod(6)" id="fp-6">6M</span>'
+      + '<span class="badge badge-gray" style="cursor:pointer" onclick="FilterPotentialModule._setForecastPeriod(12)" id="fp-12">12M</span>'
+      + '</div></div>'
+      + '<div class="card-body p0" id="forecast-table-wrap">'
+      + _buildForecastTable(forecastRows, _forecastMonths, matMap)
+      + '</div></div>';
+
+    // Customer potential card
+    html += '<div class="card">'
+      + '<div class="card-header"><h3>🏭 Potential by Customer (Top 20)</h3></div>'
+      + '<div class="card-body p0"><table class="data-table" style="width:100%">'
+      + '<thead><tr><th>Customer</th><th style="text-align:right">Installs</th><th style="text-align:right">Annual Qty</th><th style="text-align:right">Annual Value</th></tr></thead><tbody>'
+      + custRows.map(function(kv) {
+          var cid = kv[0]; var pot = kv[1];
+          var cust = custMap[cid];
+          return '<tr style="cursor:pointer" onclick="Router.navigate(\'customers\');setTimeout(function(){ CustomerModule.renderDetail(\'' + cid + '\'); },100)">'
+            + '<td class="link-cell">' + Utils.escapeHtml(cust ? cust.name : '—') + '</td>'
+            + '<td style="text-align:right">' + pot.count + '</td>'
+            + '<td style="text-align:right">' + Math.round(pot.qty).toLocaleString() + '</td>'
+            + '<td style="text-align:right">₹' + (pot.value/1000).toFixed(1) + 'K</td>'
+            + '</tr>';
+        }).join('')
+      + '</tbody></table></div></div>';
+
+    html += '</div>'; // end card-grid-2
+
+    // All installations table
+    html += '<div class="card">'
+      + '<div class="card-header" style="display:flex;align-items:center;justify-content:space-between">'
+      + '<h3>All Filter Installations (' + reqs.length + ')</h3>'
+      + '<input class="search-input" id="fp-search" placeholder="Search customer or part…" oninput="FilterPotentialModule._filterTable(this.value)" style="width:200px">'
+      + '</div>'
+      + '<div class="card-body p0" id="fp-all-table">'
+      + _buildAllTable(reqs, custMap, locMap, matMap, xrefs)
+      + '</div></div>';
+
+    content.innerHTML = html;
+  }
+
+  var _forecastMonths = 3;
+
+  function _buildForecastTable(rows, months, matMap) {
+    if (!rows.length) return '<div class="empty-log" style="padding:1rem">No data</div>';
+    return '<table class="data-table" style="width:100%">'
+      + '<thead><tr><th>Part</th><th style="text-align:right">Qty (' + months + 'M)</th><th style="text-align:right">Value (' + months + 'M)</th></tr></thead><tbody>'
+      + rows.map(function(kv) {
+          var label = kv[1].label;
+          var qty   = kv[1].qty * months;
+          var val   = kv[1].value * months;
+          return '<tr>'
+            + '<td class="font-mono">' + Utils.escapeHtml(label) + '</td>'
+            + '<td style="text-align:right">' + Math.ceil(qty) + '</td>'
+            + '<td style="text-align:right">₹' + (val/1000).toFixed(1) + 'K</td>'
+            + '</tr>';
+        }).join('')
+      + '</tbody></table>';
+  }
+
+  function _buildAllTable(reqs, custMap, locMap, matMap, xrefs) {
+    if (!reqs.length) return '<div class="empty-log" style="padding:1rem">No filter requirements recorded yet.</div>';
+    return '<div style="overflow-x:auto"><table class="data-table" style="width:100%">'
+      + '<thead><tr>'
+      + '<th>Customer</th><th>Location</th><th>Our Part</th><th>Competition Part</th>'
+      + '<th style="text-align:right">Housings</th><th style="text-align:right">Filters/Housing</th>'
+      + '<th style="text-align:right">Interval(days)</th><th style="text-align:right">Annual Qty</th>'
+      + '<th style="text-align:right">Annual Value</th><th>Actions</th>'
+      + '</tr></thead><tbody>'
+      + reqs.map(function(r) {
+          var cust = custMap[r.customerId];
+          var ourPart = r._resolvedPartId ? matMap[r._resolvedPartId] : null;
+          var compXref = r.competitorPartId ? DB.getById('crossRef', r.competitorPartId) : null;
+          var aq  = _annualQty(r);
+          var av  = _annualValue(r, matMap);
+          return '<tr>'
+            + '<td class="fw-semibold link-cell" onclick="Router.navigate(\'customers\');setTimeout(function(){ CustomerModule.renderDetail(\'' + r.customerId + '\'); },100)">'
+            + Utils.escapeHtml(cust ? cust.name : '—') + '</td>'
+            + '<td>' + Utils.escapeHtml(_locationLabel(r.locationId, locMap)) + '</td>'
+            + '<td class="font-mono">' + Utils.escapeHtml(ourPart ? ourPart.partNumber : (r._resolvedPartId ? r._resolvedPartId : '—')) + '</td>'
+            + '<td class="font-mono">' + Utils.escapeHtml(compXref ? compXref.mfgPartNumber : '—') + '</td>'
+            + '<td style="text-align:right">' + (r.housings||'—') + '</td>'
+            + '<td style="text-align:right">' + (r.filtersPerHousing||'—') + '</td>'
+            + '<td style="text-align:right">' + (r.intervalDays||'—') + '</td>'
+            + '<td style="text-align:right">' + (aq ? Math.round(aq).toLocaleString() : '—') + '</td>'
+            + '<td style="text-align:right">' + (av ? '₹' + (av/1000).toFixed(1) + 'K' : '—') + '</td>'
+            + '<td>' + Utils.actionBtns(r.id, { viewFn:'', editFn:'FilterPotentialModule.openForm', deleteFn:'FilterPotentialModule.deleteReq', view:false }) + '</td>'
+            + '</tr>';
+        }).join('')
+      + '</tbody></table></div>';
+  }
+
+  function _setForecastPeriod(m) {
+    _forecastMonths = m;
+    [3,6,12].forEach(function(n) {
+      var el = document.getElementById('fp-' + n);
+      if (el) el.className = 'badge ' + (n === m ? 'badge-blue' : 'badge-gray');
+    });
+    // Rebuild forecast table
+    var reqs    = DB.getAll('filterRequirements').filter(function(r){ return r.isActive !== false; });
+    var matMap  = Object.fromEntries(DB.getAll('materials').map(function(m){ return [m.id, m]; }));
+    var xrefs   = DB.getAll('crossRef');
+    reqs.forEach(function(r) {
+      r._resolvedPartId = _resolveOurPart(r) || r.ourPartId || r.partId || null;
+    });
+    var forecastMap = {};
+    reqs.forEach(function(r) {
+      var pid = r._resolvedPartId; if (!pid) return;
+      var qty = _annualQty(r) / 12;
+      var val = _annualValue(r, matMap) / 12;
+      if (!forecastMap[pid]) forecastMap[pid] = { qty:0, value:0, label: _partLabel(pid, matMap, xrefs) };
+      forecastMap[pid].qty += qty; forecastMap[pid].value += val;
+    });
+    var rows = Object.entries(forecastMap).sort(function(a,b){ return b[1].value - a[1].value; });
+    var wrap = document.getElementById('forecast-table-wrap');
+    if (wrap) wrap.innerHTML = _buildForecastTable(rows, m, matMap);
+  }
+
+  function _filterTable(q) {
+    var reqs = DB.getAll('filterRequirements').filter(function(r){ return r.isActive !== false; });
+    var custMap = Object.fromEntries(DB.getAll('customers').map(function(c){ return [c.id,c]; }));
+    var matMap  = Object.fromEntries(DB.getAll('materials').map(function(m){ return [m.id,m]; }));
+    var locMap  = Object.fromEntries(DB.getAll('customerLocations').map(function(l){ return [l.id,l]; }));
+    var xrefs   = DB.getAll('crossRef');
+    reqs.forEach(function(r){ r._resolvedPartId = _resolveOurPart(r)||r.ourPartId||r.partId||null; });
+    var ql = q.toLowerCase();
+    var filtered = q ? reqs.filter(function(r) {
+      var cust = custMap[r.customerId];
+      var mat  = r._resolvedPartId ? matMap[r._resolvedPartId] : null;
+      return (cust && cust.name.toLowerCase().includes(ql)) ||
+             (mat && mat.partNumber.toLowerCase().includes(ql));
+    }) : reqs;
+    var wrap = document.getElementById('fp-all-table');
+    if (wrap) wrap.innerHTML = _buildAllTable(filtered, custMap, locMap, matMap, xrefs);
+  }
+
+  // ── Add/Edit form ─────────────────────────────────────────────
+  function openForm(id, presetCustId) {
+    var r         = id ? DB.getById('filterRequirements', id) : null;
+    var customers = DB.getAll('customers').filter(function(c){ return c.isActive !== false; })
+                      .sort(function(a,b){ return a.name.localeCompare(b.name); });
+    var mats      = DB.getAll('materials').filter(function(m){ return m.isActive !== false; })
+                      .sort(function(a,b){ return (a.partNumber||'').localeCompare(b.partNumber||''); });
+    var xrefs     = DB.getAll('crossRef')
+                      .sort(function(a,b){ return (a.mfgPartNumber||'').localeCompare(b.mfgPartNumber||''); });
+
+    var selCustId = r ? r.customerId : (presetCustId || '');
+    var custLocs  = selCustId ? DB.query('customerLocations', function(l){ return l.customerId === selCustId; }) : [];
+
+    var custOpts = customers.map(function(c){
+      return '<option value="' + c.id + '"' + (selCustId === c.id ? ' selected' : '') + '>' + Utils.escapeHtml(c.name) + '</option>';
+    }).join('');
+
+    var locOpts = '<option value="">Head Office / Main Site</option>'
+      + custLocs.map(function(l){
+          return '<option value="' + l.id + '"' + (r && r.locationId === l.id ? ' selected' : '') + '>' + Utils.escapeHtml(l.name) + '</option>';
+        }).join('');
+
+    var matOpts = '<option value="">— Select our part —</option>'
+      + mats.map(function(m){
+          return '<option value="' + m.id + '"' + (r && (r.ourPartId === m.id || r.partId === m.id) ? ' selected' : '') + '>' + Utils.escapeHtml(m.partNumber) + ' — ' + Utils.escapeHtml((m.description||'').slice(0,40)) + '</option>';
+        }).join('');
+
+    var xrefOpts = '<option value="">— Select competition part —</option>'
+      + xrefs.map(function(x){
+          return '<option value="' + x.id + '"' + (r && r.competitorPartId === x.id ? ' selected' : '') + '>' + Utils.escapeHtml(x.mfgPartNumber||'') + ' (' + Utils.escapeHtml(x.manufacturerName||'') + ')</option>';
+        }).join('');
+
+    var body = '<div class="form-grid-2">'
+      + '<div class="form-group full-width"><label class="form-label required">Customer</label>'
+      + '<select class="form-select" id="fr-cust" onchange="FilterPotentialModule._onCustChange(this.value)">' + custOpts + '</select></div>'
+      + '<div class="form-group full-width"><label class="form-label">Location / Site</label>'
+      + '<select class="form-select" id="fr-loc">' + locOpts + '</select></div>'
+      + '<div class="form-group full-width"><label class="form-label">Our Part Number</label>'
+      + '<select class="form-select" id="fr-part" onchange="FilterPotentialModule._onPartChange(this.value)">' + matOpts + '</select></div>'
+      + '<div class="form-group full-width"><label class="form-label">Competition Part (auto-resolves our equivalent)</label>'
+      + '<select class="form-select" id="fr-xref" onchange="FilterPotentialModule._onXrefChange(this.value)">' + xrefOpts + '</select>'
+      + '<div id="fr-xref-resolved" style="font-size:12px;color:var(--success);margin-top:4px"></div></div>'
+      + '<div class="form-group"><label class="form-label required">No. of Housings</label>'
+      + '<input class="form-input" id="fr-housings" type="number" min="1" value="' + (r ? r.housings : 1) + '"></div>'
+      + '<div class="form-group"><label class="form-label required">Filters per Housing</label>'
+      + '<input class="form-input" id="fr-fph" type="number" min="1" value="' + (r ? r.filtersPerHousing : 1) + '"></div>'
+      + '<div class="form-group"><label class="form-label required">Change Interval (days)</label>'
+      + '<input class="form-input" id="fr-interval" type="number" min="1" value="' + (r ? r.intervalDays : 90) + '"></div>'
+      + '<div class="form-group"><label class="form-label">Potential Preview</label>'
+      + '<div id="fr-preview" class="form-input" style="background:var(--bg-secondary);color:var(--text-muted)">Fill fields to see potential</div></div>'
+      + '<div class="form-group full-width"><label class="form-label">Notes</label>'
+      + '<input class="form-input" id="fr-notes" value="' + Utils.escapeHtml(r ? r.notes||'' : '') + '" placeholder="e.g. Line 1 only, seasonal use…"></div>'
+      + '</div>';
+
+    Modal.open(r ? 'Edit Filter Requirement' : 'Add Filter Requirement', body, {
+      saveLabel: r ? 'Update' : 'Save',
+      onSave: function() { _saveReq(r); }
+    });
+
+    // If editing with xref, show resolved part
+    if (r && r.competitorPartId) {
+      setTimeout(function(){ _onXrefChange(r.competitorPartId); }, 100);
+    }
+    _updatePreview();
+  }
+
+  function _onCustChange(custId) {
+    var locs = custId ? DB.query('customerLocations', function(l){ return l.customerId === custId; }) : [];
+    var sel  = document.getElementById('fr-loc');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">Head Office / Main Site</option>'
+      + locs.map(function(l){
+          return '<option value="' + l.id + '">' + Utils.escapeHtml(l.name) + '</option>';
+        }).join('');
+  }
+
+  function _onPartChange(partId) {
+    // Clear competition part if our part selected
+    if (partId) {
+      var sel = document.getElementById('fr-xref');
+      if (sel) sel.value = '';
+      var res = document.getElementById('fr-xref-resolved');
+      if (res) res.textContent = '';
+    }
+    _updatePreview();
+  }
+
+  function _onXrefChange(xrefId) {
+    var res = document.getElementById('fr-xref-resolved');
+    if (!xrefId) { if (res) res.textContent = ''; return; }
+    var xref = DB.getById('crossRef', xrefId);
+    if (xref && xref.ourPartId) {
+      var mat = DB.getById('materials', xref.ourPartId);
+      if (res) res.textContent = '✓ Our equivalent: ' + (mat ? mat.partNumber : xref.ourPartId);
+      // Auto-select our part
+      var partSel = document.getElementById('fr-part');
+      if (partSel) partSel.value = xref.ourPartId;
+    } else {
+      if (res) res.textContent = '⚠ No equivalent mapped yet (TBD)';
+    }
+    _updatePreview();
+  }
+
+  function _updatePreview() {
+    var prev = document.getElementById('fr-preview');
+    if (!prev) return;
+    var partId    = (document.getElementById('fr-part')||{value:''}).value;
+    var housings  = parseFloat((document.getElementById('fr-housings')||{value:0}).value)||0;
+    var fph       = parseFloat((document.getElementById('fr-fph')||{value:0}).value)||0;
+    var interval  = parseFloat((document.getElementById('fr-interval')||{value:0}).value)||0;
+    if (!housings || !fph || !interval) { prev.textContent = 'Fill fields to see potential'; return; }
+    var qty = housings * fph * (365 / interval);
+    var mat = partId ? DB.getById('materials', partId) : null;
+    var val = (mat && mat.listPrice) ? qty * parseFloat(mat.listPrice) : 0;
+    prev.textContent = Math.round(qty).toLocaleString() + ' units/year'
+      + (val ? ' · ₹' + (val/1000).toFixed(1) + 'K/year' : ' · value N/A');
+    prev.style.color = 'var(--success)';
+  }
+
+  function _saveReq(existing) {
+    var custId   = (document.getElementById('fr-cust')||{value:''}).value;
+    var locId    = (document.getElementById('fr-loc')||{value:''}).value || null;
+    var partId   = (document.getElementById('fr-part')||{value:''}).value || null;
+    var xrefId   = (document.getElementById('fr-xref')||{value:''}).value || null;
+    var housings = parseInt((document.getElementById('fr-housings')||{value:0}).value)||0;
+    var fph      = parseInt((document.getElementById('fr-fph')||{value:0}).value)||0;
+    var interval = parseInt((document.getElementById('fr-interval')||{value:0}).value)||0;
+    var notes    = (document.getElementById('fr-notes')||{value:''}).value.trim();
+
+    if (!custId)   { Utils.toast('Customer required','error'); return; }
+    if (!partId && !xrefId) { Utils.toast('Select our part or competition part','error'); return; }
+    if (!housings) { Utils.toast('Housings required','error'); return; }
+    if (!fph)      { Utils.toast('Filters per housing required','error'); return; }
+    if (!interval) { Utils.toast('Change interval required','error'); return; }
+
+    // Resolve ourPartId from xref if needed
+    var ourPartId = partId;
+    if (!ourPartId && xrefId) {
+      var xref = DB.getById('crossRef', xrefId);
+      if (xref && xref.ourPartId) ourPartId = xref.ourPartId;
+    }
+
+    var data = {
+      customerId: custId, locationId: locId,
+      partId: ourPartId, ourPartId: ourPartId,
+      competitorPartId: xrefId,
+      housings: housings, filtersPerHousing: fph, intervalDays: interval,
+      notes: notes, isActive: true
+    };
+
+    if (existing) {
+      DB.update('filterRequirements', existing.id, data);
+      Utils.toast('Requirement updated');
+    } else {
+      DB.insert('filterRequirements', Object.assign({ id: Utils.uid('FLR') }, data));
+      Utils.toast('Requirement added ✓');
+    }
+    Modal.close();
+    render();
+  }
+
+  async function deleteReq(id) {
+    if (!await Utils.confirm('Delete this filter requirement?')) return;
+    DB.remove('filterRequirements', id);
+    Utils.toast('Deleted');
+    render();
+  }
+
+  // ── Customer detail tab: filter requirements ─────────────────
+  function renderCustomerTab(custId) {
+    var reqs   = DB.query('filterRequirements', function(r){ return r.customerId === custId && r.isActive !== false; });
+    var mats   = DB.getAll('materials');
+    var matMap = Object.fromEntries(mats.map(function(m){ return [m.id, m]; }));
+    var locMap = Object.fromEntries(DB.getAll('customerLocations').map(function(l){ return [l.id,l]; }));
+    var xrefs  = DB.getAll('crossRef');
+
+    reqs.forEach(function(r){ r._resolvedPartId = _resolveOurPart(r)||r.ourPartId||r.partId||null; });
+
+    var totalQty = reqs.reduce(function(s,r){ return s+_annualQty(r); }, 0);
+    var totalVal = reqs.reduce(function(s,r){ return s+_annualValue(r,matMap); }, 0);
+
+    var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">'
+      + '<div style="font-size:13px;color:var(--text-muted)">'
+      + reqs.length + ' installation' + (reqs.length!==1?'s':'')
+      + (totalQty ? ' · ' + Math.round(totalQty).toLocaleString() + ' units/year' : '')
+      + (totalVal ? ' · ₹' + (totalVal/1000).toFixed(1) + 'K/year' : '')
+      + '</div>'
+      + '<button class="btn btn-sm btn-primary" onclick="FilterPotentialModule.openForm(null,\'' + custId + '\')">+ Add Requirement</button>'
+      + '</div>';
+
+    if (!reqs.length) {
+      html += '<div class="empty-log" style="padding:2rem;text-align:center;color:var(--text-muted)">'
+        + 'No filter requirements recorded for this customer yet.</div>';
+      return html;
+    }
+
+    html += '<div style="overflow-x:auto"><table class="data-table" style="width:100%">'
+      + '<thead><tr><th>Location</th><th>Our Part</th><th>Comp. Part</th>'
+      + '<th style="text-align:right">H</th><th style="text-align:right">F/H</th>'
+      + '<th style="text-align:right">Interval</th><th style="text-align:right">Annual Qty</th>'
+      + '<th style="text-align:right">Annual Value</th><th>Actions</th></tr></thead><tbody>'
+      + reqs.map(function(r) {
+          var ourPart  = r._resolvedPartId ? matMap[r._resolvedPartId] : null;
+          var compXref = r.competitorPartId ? DB.getById('crossRef', r.competitorPartId) : null;
+          var aq = _annualQty(r);
+          var av = _annualValue(r, matMap);
+          return '<tr>'
+            + '<td>' + Utils.escapeHtml(_locationLabel(r.locationId, locMap)) + '</td>'
+            + '<td class="font-mono">' + Utils.escapeHtml(ourPart ? ourPart.partNumber : '—') + '</td>'
+            + '<td class="font-mono">' + Utils.escapeHtml(compXref ? (compXref.mfgPartNumber||'—') : '—') + '</td>'
+            + '<td style="text-align:right">' + (r.housings||'—') + '</td>'
+            + '<td style="text-align:right">' + (r.filtersPerHousing||'—') + '</td>'
+            + '<td style="text-align:right">' + (r.intervalDays ? r.intervalDays+'d' : '—') + '</td>'
+            + '<td style="text-align:right">' + (aq ? Math.round(aq).toLocaleString() : '—') + '</td>'
+            + '<td style="text-align:right">' + (av ? '₹'+(av/1000).toFixed(1)+'K' : '—') + '</td>'
+            + '<td>' + Utils.actionBtns(r.id, { viewFn:'', editFn:'FilterPotentialModule.openForm', deleteFn:'FilterPotentialModule.deleteReq', view:false }) + '</td>'
+            + '</tr>';
+        }).join('')
+      + '</tbody></table></div>';
+
+    return html;
+  }
+
+  return {
+    render, openForm, deleteReq,
+    renderCustomerTab,
+    _onCustChange, _onPartChange, _onXrefChange, _updatePreview,
+    _setForecastPeriod, _filterTable
+  };
+})();
+
+</script>
+
+<script>
 /* === drive_sync.js === */
 /**
  * Google Drive Sync Module — KUFI ERP v2
@@ -12541,6 +13081,7 @@ const DriveSync = (() => {
     Router.register('activities',  () => { setHeader('Sales Activities'); ActivityModule.render(); });
     Router.register('tasks',       () => { setHeader('Task Dashboard'); TaskModule.render(); });
     Router.register('review',      () => { setHeader('Review Meeting'); ReviewModule.render(); });
+    Router.register('filterpotential', () => { setHeader('Filter Potential'); FilterPotentialModule.render(); });
     Router.register('users',       () => { setHeader('User Management'); UserModule.render(); });
     Router.register('audit',       () => { setHeader('Audit Trail'); AuditModule.render(); });
     Router.register('backup',      () => { setHeader('Backup & Export'); BackupModule.render(); });
