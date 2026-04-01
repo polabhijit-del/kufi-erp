@@ -5843,7 +5843,7 @@ const CrossRefModule = (function() {
   /* ── form ── */
   function openForm(id, presetPartId) {
     var x       = id ? DB.getById('crossRef', id) : null;
-    var mats    = DB.getAll('materials').filter(function(m){return m.isActive;});
+    var mats    = DB.getAll('materials').filter(function(m){return m.isActive;}).sort(function(a,b){ return (a.partNumber||'').localeCompare(b.partNumber||''); });
     var preset  = x ? x.ourPartId : (presetPartId||'');
     var matOpts = mats.map(function(m){
       return '<option value="'+m.id+'"'+(preset===m.id?' selected':'')+'>'+Utils.escapeHtml(m.partNumber)+' — '+Utils.escapeHtml(m.description.slice(0,45))+'</option>';
