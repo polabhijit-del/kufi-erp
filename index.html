@@ -6539,7 +6539,7 @@ const CustomerModule = (() => {
       </div>
 
       <div id="tab-filterpot" class="tab-content" style="display:none">
-        ${FilterPotentialModule ? FilterPotentialModule.renderCustomerTab('${c.id}') : '<p>Loading…</p>'}
+        ${FilterPotentialModule ? FilterPotentialModule.renderCustomerTab(c.id) : '<p>Loading…</p>'}
       </div>
     `;
   }
