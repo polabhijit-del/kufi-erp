@@ -6541,7 +6541,7 @@ const CustomerModule = (() => {
       <div id="tab-filterpot" class="tab-content" style="display:none">
         ${FilterPotentialModule ? FilterPotentialModule.renderCustomerTab('${c.id}') : '<p>Loading…</p>'}
       </div>
-    \`;
+    `;
   }
 
   function switchTab(btn, tabId) {
@@ -10279,7 +10279,7 @@ const BackupModule = (function() {
   var ALL_STORES = [
     'users','company','departments','employees','assets',
     'materials','crossRef','vendors',
-    'customers','customerContacts','customerLocations','customerRequests',
+    'customers','customerContacts','customerLocations','customerRequests', 'filterRequirements',
     'stages','activities','activityLogs','activityTasks',
     'specCategories','applications','segments','leadSources',
     'states','regions','audit',
@@ -10404,7 +10404,8 @@ const BackupModule = (function() {
             'states':            'states',
             'regions':           'regions',
             'specCategories':    'specCategories',
-            'applications':      'applications'
+            'applications':      'applications',
+            'filterRequirements': 'filterRequirements'
           };
           var stores = {};
           Object.keys(data).forEach(function(k) {
@@ -12890,7 +12891,8 @@ const DriveSync = (() => {
       'states':             'states',
       'regions':            'regions',
       'specCategories':     'specCategories',
-      'applications':       'applications'
+      'applications':       'applications',
+      'filterRequirements':  'filterRequirements'
     };
     var data = {};
     Object.keys(storeMap).forEach(function(s) { data[s] = DB.getAll(storeMap[s]); });
